@@ -1,0 +1,10 @@
+# Pastas de instalações locais e versões
+/Antigravity/
+/Antigravity_IDE/
+/Antigravity_VERSOES/
+/Antigravity_IDE_VERSOES/
+
+# Arquivos temporários do sistema ou scripts
+*.tar.gz
+*.html
+*.js
