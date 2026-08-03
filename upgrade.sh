@@ -165,18 +165,19 @@ menu_selecao() {
     print_opcao 1 "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)"
     print_opcao 2 "Instalar/Atualizar Apenas Antigravity (Hub)"
     print_opcao 3 "Instalar/Atualizar Apenas Antigravity IDE"
-    print_opcao 4 "Sair"
+    print_opcao 4 "Forçar Reinstalação de Ambos (Mesmo na mesma versão)"
+    print_opcao 5 "Sair"
     echo -e "${CLR_HEADER}╚${LINHA_BORDAS}╝${CLR_RESET}"
 
     while true; do
-        read -p "Digite sua escolha (1-4): " ESCOLHA
+        read -p "Digite sua escolha (1-5): " ESCOLHA
         case "$ESCOLHA" in
-            1|2|3|4)
+            1|2|3|4|5)
                 OPCAO_SELECIONADA="$ESCOLHA"
                 return
                 ;;
             *)
-                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 4.${CLR_RESET}"
+                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 5.${CLR_RESET}"
                 ;;
         esac
     done
@@ -254,6 +255,7 @@ EOF
 atualizar_aplicativo() {
     local NOME_APP=$1
     local PADRAO_URL=$2
+    local FORCAR=${3:-0}
 
     echo -e "\n${CLR_BLUE}⚡ Analisando: $NOME_APP ($PADRAO_URL) ${CLR_RESET}"
     echo -e "  ${CLR_GRAY}----------------------------------------${CLR_RESET}"
@@ -275,22 +277,39 @@ atualizar_aplicativo() {
         return 1
     fi
 
-    # 3. Verificar versão local atual
+    # Obter data/hora do arquivo no servidor remoto via HTTP HEAD
+    LAST_MOD=$(curl -sI -A "Mozilla/5.0" "$URL_DOWNLOAD" | grep -i "^last-modified:" | cut -d':' -f2- | xargs 2>/dev/null)
+    STR_DATA_WEB=""
+    if [ -n "$LAST_MOD" ]; then
+        DATA_SERVIDOR_FMT=$(date -d "$LAST_MOD" +"%d/%m/%Y %H:%M:%S" 2>/dev/null || echo "$LAST_MOD")
+        STR_DATA_WEB=" (Lançado em: $DATA_SERVIDOR_FMT)"
+    fi
+
+    # 3. Verificar versão local atual e data de instalação
     PASTA_APP="$DIRETORIO_BASE/$NOME_APP"
     ARQUIVO_VERSAO_LOCAL="$PASTA_APP/version.txt"
+    STR_DATA_LOCAL=""
     
     if [ -f "$ARQUIVO_VERSAO_LOCAL" ]; then
         VERSAO_LOCAL=$(cat "$ARQUIVO_VERSAO_LOCAL")
+        DATA_LOCAL_FMT=$(date -r "$ARQUIVO_VERSAO_LOCAL" +"%d/%m/%Y %H:%M:%S" 2>/dev/null)
+        if [ -n "$DATA_LOCAL_FMT" ]; then
+            STR_DATA_LOCAL=" (Instalado em: $DATA_LOCAL_FMT)"
+        fi
     else
         VERSAO_LOCAL="Nenhuma (Instalação Nova)"
     fi
 
-    echo -e "  ${CLR_WHITE}Versão na Web: ${CLR_CYAN}$VERSAO_WEB${CLR_RESET}"
-    echo -e "  ${CLR_WHITE}Versão Local:  ${CLR_GRAY}$VERSAO_LOCAL${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}Versão na Web: ${CLR_CYAN}$VERSAO_WEB${CLR_RESET}${CLR_GRAY}$STR_DATA_WEB${CLR_RESET}"
+    echo -e "  ${CLR_WHITE}Versão Local:  ${CLR_GRAY}$VERSAO_LOCAL$STR_DATA_LOCAL${CLR_RESET}"
 
     # 4. Tomada de Decisão e Atualização
-    if [ "$VERSAO_LOCAL" != "$VERSAO_WEB" ]; then
-        echo -e "  ${CLR_WARNING}➜ Nova versão disponível! Inicializando download...${CLR_RESET}"
+    if [ "$VERSAO_LOCAL" != "$VERSAO_WEB" ] || [ "$FORCAR" -eq 1 ]; then
+        if [ "$VERSAO_LOCAL" = "$VERSAO_WEB" ] && [ "$FORCAR" -eq 1 ]; then
+            echo -e "  ${CLR_WARNING}➜ Versões coincidem, mas a reinstalação foi forçada! Inicializando download...${CLR_RESET}"
+        else
+            echo -e "  ${CLR_WARNING}➜ Nova versão disponível! Inicializando download...${CLR_RESET}"
+        fi
         
         ARQUIVO_TAR="$PASTA_TMP/$NOME_APP.tar.gz"
         echo -e "  ${CLR_BLUE}Baixando $NOME_APP...${CLR_RESET}"
@@ -345,25 +364,34 @@ atualizar_aplicativo() {
 # Exibe diagnóstico do sistema
 exibir_diagnosticos
 
-# Determina a opção a partir de argumentos de linha de comando para automações
+# Determina a opção e flags a partir de argumentos de linha de comando para automações
 OPCAO_SELECIONADA=""
-if [ -n "$1" ]; then
-    ARG=$(echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/^-*//')
-    case "$ARG" in
-        1|both|all)
-            OPCAO_SELECIONADA="1"
-            ;;
-        2|hub|antigravity)
-            OPCAO_SELECIONADA="2"
-            ;;
-        3|ide|antigravity-ide)
-            OPCAO_SELECIONADA="3"
-            ;;
-        4|exit|quit)
-            OPCAO_SELECIONADA="4"
-            ;;
-    esac
-fi
+FORCAR_REINSTALACAO=0
+
+for arg in "$@"; do
+    ARG_CLEAN=$(echo "$arg" | tr '[:upper:]' '[:lower:]' | sed 's/^-*//')
+    if [ "$ARG_CLEAN" = "force" ] || [ "$ARG_CLEAN" = "f" ]; then
+        FORCAR_REINSTALACAO=1
+    elif [ -z "$OPCAO_SELECIONADA" ]; then
+        case "$ARG_CLEAN" in
+            1|both|all)
+                OPCAO_SELECIONADA="1"
+                ;;
+            2|hub|antigravity)
+                OPCAO_SELECIONADA="2"
+                ;;
+            3|ide|antigravity-ide)
+                OPCAO_SELECIONADA="3"
+                ;;
+            4|reinstall)
+                OPCAO_SELECIONADA="4"
+                ;;
+            5|exit|quit)
+                OPCAO_SELECIONADA="5"
+                ;;
+        esac
+    fi
+done
 
 if [ -z "$OPCAO_SELECIONADA" ]; then
     # Exibe menu de escolhas se nenhum argumento válido for fornecido
@@ -371,6 +399,9 @@ if [ -z "$OPCAO_SELECIONADA" ]; then
 fi
 
 if [ "$OPCAO_SELECIONADA" = "4" ]; then
+    OPCAO_SELECIONADA="1"
+    FORCAR_REINSTALACAO=1
+elif [ "$OPCAO_SELECIONADA" = "5" ]; then
     echo -e "\n${CLR_BLUE}Saindo sem realizar alterações.${CLR_RESET}\n"
     exit 0
 fi
@@ -404,9 +435,9 @@ parar_spinner 0 "Versões e links da web carregados com sucesso!"
 # Processa a opção escolhida
 SUCESSO=0
 if [ "$OPCAO_SELECIONADA" = "1" ]; then
-    atualizar_aplicativo "Antigravity" "antigravity-hub"
+    atualizar_aplicativo "Antigravity" "antigravity-hub" "$FORCAR_REINSTALACAO"
     s1=$?
-    atualizar_aplicativo "Antigravity_IDE" "stable"
+    atualizar_aplicativo "Antigravity_IDE" "stable" "$FORCAR_REINSTALACAO"
     s2=$?
     if [ $s1 -eq 0 ] && [ $s2 -eq 0 ]; then
         SUCESSO=0
@@ -414,10 +445,10 @@ if [ "$OPCAO_SELECIONADA" = "1" ]; then
         SUCESSO=1
     fi
 elif [ "$OPCAO_SELECIONADA" = "2" ]; then
-    atualizar_aplicativo "Antigravity" "antigravity-hub"
+    atualizar_aplicativo "Antigravity" "antigravity-hub" "$FORCAR_REINSTALACAO"
     SUCESSO=$?
 elif [ "$OPCAO_SELECIONADA" = "3" ]; then
-    atualizar_aplicativo "Antigravity_IDE" "stable"
+    atualizar_aplicativo "Antigravity_IDE" "stable" "$FORCAR_REINSTALACAO"
     SUCESSO=$?
 fi
 

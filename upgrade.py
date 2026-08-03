@@ -11,6 +11,8 @@ import tarfile
 import inspect
 import time
 import threading
+import email.utils
+from datetime import datetime
 
 # Cores ANSI para a interface
 CLR_RESET = "\033[0m"
@@ -183,18 +185,36 @@ def menu_selecao():
     print_opcao(1, "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)")
     print_opcao(2, "Instalar/Atualizar Apenas Antigravity (Hub)")
     print_opcao(3, "Instalar/Atualizar Apenas Antigravity IDE")
-    print_opcao(4, "Sair")
+    print_opcao(4, "Forçar Reinstalação de Ambos (Mesmo na mesma versão)")
+    print_opcao(5, "Sair")
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}")
     
     while True:
         try:
-            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-4): {CLR_RESET}").strip()
-            if opcao in ("1", "2", "3", "4"):
+            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-5): {CLR_RESET}").strip()
+            if opcao in ("1", "2", "3", "4", "5"):
                 return opcao
-            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 4.{CLR_RESET}")
+            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 5.{CLR_RESET}")
         except (KeyboardInterrupt, EOFError):
             print(f"\n{CLR_WARNING}Operação cancelada pelo usuário.{CLR_RESET}")
-            return "4"
+            return "5"
+
+# Função para obter a data de modificação no servidor remoto
+def obter_data_servidor(url):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        method="HEAD"
+    )
+    try:
+        with urllib.request.urlopen(req) as response:
+            last_modified = response.info().get("Last-Modified")
+            if last_modified:
+                dt = email.utils.parsedate_to_datetime(last_modified)
+                return dt.astimezone().strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        pass
+    return None
 
 # Função para requisições HTTP
 def fetch_url(url):
@@ -316,7 +336,7 @@ Categories=Development;
         return False
 
 # Função interna para processar cada um dos aplicativos
-def atualizar_aplicativo(nome_app, padrao_url):
+def atualizar_aplicativo(nome_app, padrao_url, forcar=False):
     print(f"\n{CLR_BLUE}⚡ Analisando: {nome_app} ({padrao_url}) {CLR_RESET}")
     print(f"  {CLR_GRAY}----------------------------------------{CLR_RESET}")
 
@@ -340,7 +360,7 @@ def atualizar_aplicativo(nome_app, padrao_url):
         return False
     versao_web = match_versao.group(1)
 
-    # 3. Verificar versão local atual
+    # 3. Verificar versão local atual e data de instalação
     pasta_app = os.path.join(DIRETORIO_BASE, nome_app)
     arquivo_versao_local = os.path.join(pasta_app, "version.txt")
 
@@ -348,17 +368,29 @@ def atualizar_aplicativo(nome_app, padrao_url):
         try:
             with open(arquivo_versao_local, "r") as f:
                 versao_local = f.read().strip()
+            mtime = os.path.getmtime(arquivo_versao_local)
+            dt_local = datetime.fromtimestamp(mtime).strftime("%d/%m/%Y %H:%M:%S")
+            str_data_local = f" (Instalado em: {dt_local})"
         except Exception:
             versao_local = "Desconhecida"
+            str_data_local = ""
     else:
         versao_local = "Nenhuma (Instalação Nova)"
+        str_data_local = ""
 
-    print(f"  {CLR_WHITE}Versão na Web: {CLR_CYAN}{versao_web}{CLR_RESET}")
-    print(f"  {CLR_WHITE}Versão Local:  {CLR_GRAY}{versao_local}{CLR_RESET}")
+    # 4. Obter data do arquivo no servidor
+    data_servidor = obter_data_servidor(url_download)
+    str_data_web = f" (Lançado em: {data_servidor})" if data_servidor else ""
 
-    # 4. Tomada de Decisão e Atualização
-    if versao_local != versao_web:
-        print(f"  {CLR_WARNING}➜ Nova versão disponível! Inicializando download...{CLR_RESET}")
+    print(f"  {CLR_WHITE}Versão na Web: {CLR_CYAN}{versao_web}{CLR_RESET}{CLR_GRAY}{str_data_web}{CLR_RESET}")
+    print(f"  {CLR_WHITE}Versão Local:  {CLR_GRAY}{versao_local}{str_data_local}{CLR_RESET}")
+
+    # 5. Tomada de Decisão e Atualização
+    if versao_local != versao_web or forcar:
+        if versao_local == versao_web and forcar:
+            print(f"  {CLR_WARNING}➜ Versões coincidem, mas a reinstalação foi forçada! Inicializando download...{CLR_RESET}")
+        else:
+            print(f"  {CLR_WARNING}➜ Nova versão disponível! Inicializando download...{CLR_RESET}")
         arquivo_tar = os.path.join(PASTA_TMP, f"{nome_app}.tar.gz")
 
         # Download do arquivo com progresso
@@ -440,24 +472,36 @@ if __name__ == "__main__":
     # Exibe diagnósticos
     exibir_diagnosticos()
     
-    # Determina a opção a partir de argumentos de linha de comando para automações
+    # Determina a opção e flags a partir de argumentos de linha de comando para automações
     opcao = None
-    if len(sys.argv) > 1:
-        arg = sys.argv[1].lower().strip("-")
+    forcar_reinstalacao = False
+
+    args = [arg.lower().strip("-") for arg in sys.argv[1:]]
+    if "force" in args or "f" in args:
+        forcar_reinstalacao = True
+        args = [a for a in args if a not in ("force", "f")]
+
+    if len(args) > 0:
+        arg = args[0]
         if arg in ("1", "both", "all"):
             opcao = "1"
         elif arg in ("2", "hub", "antigravity"):
             opcao = "2"
         elif arg in ("3", "ide", "antigravity-ide"):
             opcao = "3"
-        elif arg in ("4", "exit", "quit"):
+        elif arg in ("4", "reinstall"):
             opcao = "4"
+        elif arg in ("5", "exit", "quit"):
+            opcao = "5"
             
     if opcao is None:
         # Exibe menu de seleção se nenhum argumento válido for fornecido
         opcao = menu_selecao()
         
     if opcao == "4":
+        opcao = "1"
+        forcar_reinstalacao = True
+    elif opcao == "5":
         print(f"\n{CLR_BLUE}Saindo sem realizar alterações.{CLR_RESET}\n")
         sys.exit(0)
         
@@ -487,13 +531,13 @@ if __name__ == "__main__":
     # Executa a ação escolhida
     sucesso = True
     if opcao == "1":
-        s1 = atualizar_aplicativo("Antigravity", "antigravity-hub")
-        s2 = atualizar_aplicativo("Antigravity_IDE", "stable")
+        s1 = atualizar_aplicativo("Antigravity", "antigravity-hub", forcar=forcar_reinstalacao)
+        s2 = atualizar_aplicativo("Antigravity_IDE", "stable", forcar=forcar_reinstalacao)
         sucesso = s1 and s2
     elif opcao == "2":
-        sucesso = atualizar_aplicativo("Antigravity", "antigravity-hub")
+        sucesso = atualizar_aplicativo("Antigravity", "antigravity-hub", forcar=forcar_reinstalacao)
     elif opcao == "3":
-        sucesso = atualizar_aplicativo("Antigravity_IDE", "stable")
+        sucesso = atualizar_aplicativo("Antigravity_IDE", "stable", forcar=forcar_reinstalacao)
         
     if sucesso:
         print(f"\n{CLR_HEADER}======================================================={CLR_RESET}")
