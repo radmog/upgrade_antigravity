@@ -15,8 +15,10 @@ def _user_paths(tmp_path):
         scope="user",
         base_dir=tmp_path / "data" / "apps",
         lock_file=tmp_path / "state" / "updater.lock",
+        state_dir=tmp_path / "state",
         launcher_dir=tmp_path / "data" / "applications",
         unit_dir=tmp_path / "config" / "systemd" / "user",
+        config_dir=tmp_path / "config" / "antigravity-updater",
         systemctl=("systemctl", "--user"),
         requires_root=False,
     )

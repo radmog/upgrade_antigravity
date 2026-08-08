@@ -22,6 +22,10 @@ Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o 
 - **Desinstalação Segura**: Remove apenas links, históricos, estados e launchers previamente validados como gerenciados.
 - **Launchers XDG**: Publica atalhos no menu de aplicativos para o escopo selecionado.
 - **Systemd Gerenciado**: Instala, consulta e remove serviço/timer pelo próprio comando.
+- **Canais e Políticas**: Seleciona versões estáveis ou preview, permite pins e verificações sem instalação.
+- **Configuração por Escopo**: Mantém preferências independentes para usuário e sistema.
+- **Cache Resiliente**: Reutiliza metadados HTTP dentro do TTL e oferece fallback expirado quando a rede falha.
+- **Observabilidade**: Registra eventos JSON rotativos e pode emitir notificações desktop.
 
 ---
 
@@ -95,6 +99,9 @@ sudo ./upgrade.py update --both --force
 
 # Para consultar as notas mais recentes sem instalar/atualizar
 ./upgrade.py changelog
+
+# Verificar atualizações sem modificar a instalação
+./upgrade.py check --both --user
 ```
 
 As formas históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both`,
@@ -178,6 +185,70 @@ No escopo de usuário, as unidades ficam em
 `systemctl --user`. No escopo global, ficam em `/etc/systemd/system`. O timer
 preserva os caminhos XDG resolvidos durante a instalação e executa
 `update --both` no mesmo escopo.
+
+---
+
+## ⚙️ Políticas, configuração e observabilidade
+
+Cada escopo possui configuração independente. Para o usuário, o arquivo fica em
+`$XDG_CONFIG_HOME/antigravity-updater/config.json`; para o sistema, em
+`/etc/antigravity-updater/config.json`.
+
+```bash
+# Mostrar configuração efetiva e o caminho do arquivo
+./upgrade.py config show --user
+./upgrade.py config path --user
+
+# Selecionar previews e apenas notificar, sem instalar
+./upgrade.py config set channel preview --user
+./upgrade.py config set policy notify-only --user
+
+# Fixar uma versão do Hub; "none" remove o pin
+./upgrade.py config set pin_hub 2.6.0-4603467860410368 --user
+./upgrade.py config set pin_hub none --user
+
+# Retenção, cache, logs e notificações
+./upgrade.py config set retention 3 --user
+./upgrade.py config set cache_ttl 3600 --user
+./upgrade.py config set log_level INFO --user
+./upgrade.py config set notifications auto --user
+
+# Restaurar os padrões
+./upgrade.py config reset --user
+```
+
+Chaves disponíveis:
+
+| Chave | Valores | Padrão |
+| --- | --- | --- |
+| `channel` | `stable`, `preview` | `stable` |
+| `policy` | `latest`, `notify-only` | `latest` |
+| `retention` | 1 a 100 | 2 |
+| `cache_ttl` | 0 a 604800 segundos | 3600 |
+| `notifications` | `off`, `auto`, `desktop` | `off` |
+| `log_level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
+| `pin_hub`, `pin_ide` | versão exata ou `none` | `none` |
+
+O canal `stable` ignora versões com marcadores de pré-lançamento. `preview`
+também considera previews anunciados no catálogo oficial descoberto; ele não
+inventa URLs nem troca para endpoints não publicados. A política `notify-only`
+analisa e apresenta a versão candidata, mas termina antes de download, launcher
+ou alteração local. O comando `check` sempre usa esse comportamento.
+
+```bash
+# Inspecionar e limpar o cache do usuário
+./upgrade.py cache status --user
+./upgrade.py cache clear --user
+
+# Mostrar os 50 eventos JSON mais recentes
+./upgrade.py logs --tail 50 --user
+```
+
+O cache e os logs do usuário ficam sob `$XDG_STATE_HOME/antigravity-updater`.
+No escopo global, ficam em `/var/lib/antigravity-updater`. Metadados expirados
+só são reutilizados quando uma nova busca falha; pacotes `.tar.gz` nunca entram
+nesse cache. Defina `cache_ttl` como `0` para desabilitar leitura e escrita do
+cache. Os logs giram em 1 MiB e mantêm três backups.
 
 ---
 

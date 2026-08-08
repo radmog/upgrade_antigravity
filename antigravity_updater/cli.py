@@ -1,14 +1,20 @@
 """Interface de linha de comando do Antigravity Updater."""
 
 import argparse
+import json
 import os
 import shutil
 import sys
+from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional, Sequence
 
 from . import __version__
+from . import cache as cache_module
 from . import core
+from . import observability
+from . import settings as settings_module
 from . import systemd as systemd_integration
 from .paths import ScopePaths, resolve_scope
 
@@ -36,6 +42,10 @@ def _add_scope(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(scope="system")
 
 
+def _add_channel(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--channel", choices=("stable", "preview"), help="sobrescrever o canal configurado")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="antigravity-upgrade",
@@ -47,9 +57,17 @@ def build_parser() -> argparse.ArgumentParser:
     update = subparsers.add_parser("update", help="instalar ou atualizar aplicativos")
     _add_targets(update)
     _add_scope(update)
+    _add_channel(update)
     update.add_argument("--force", "-f", action="store_true", help="reinstalar mesmo na versão atual")
+    update.add_argument("--policy", choices=("latest", "notify-only"), help="sobrescrever a política configurada")
+
+    check = subparsers.add_parser("check", help="verificar atualizações sem alterar a instalação")
+    _add_targets(check)
+    _add_scope(check)
+    _add_channel(check)
 
     changelog = subparsers.add_parser("changelog", help="consultar notas oficiais sem exigir root")
+    _add_scope(changelog)
     changelog.set_defaults(target="both")
 
     current = subparsers.add_parser("current", help="mostrar versões ativas sem exigir root")
@@ -88,6 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
     systemd.add_argument("action", choices=("install", "remove", "status"), help="ação sobre as unidades")
     _add_scope(systemd)
     systemd.add_argument("--calendar", default="daily", help="expressão OnCalendar usada na instalação")
+
+    config = subparsers.add_parser("config", help="consultar ou alterar a configuração")
+    config.add_argument("action", choices=("show", "path", "set", "reset"))
+    config.add_argument("key", nargs="?")
+    config.add_argument("value", nargs="?")
+    _add_scope(config)
+
+    cache = subparsers.add_parser("cache", help="consultar ou limpar o cache HTTP")
+    cache.add_argument("action", choices=("status", "clear"))
+    _add_scope(cache)
+
+    logs = subparsers.add_parser("logs", help="mostrar eventos recentes do log estruturado")
+    logs.add_argument("--tail", type=int, default=20, help="quantidade de eventos (padrão: 20)")
+    _add_scope(logs)
     return parser
 
 
@@ -174,10 +206,16 @@ def _selected_apps(target: str) -> List[str]:
     return ["Antigravity", "Antigravity_IDE"]
 
 
-def _show_changelog() -> int:
+def _cached_fetch(cache: cache_module.TextCache, url: str, logger) -> str:
+    result = cache.fetch(url, core.fetch_url)
+    observability.event(logger, "cache_fetch", url=url, status=result.status)
+    return result.text
+
+
+def _show_changelog(cache: cache_module.TextCache, logger) -> int:
     spinner = core.TerminalSpinner("Buscando changelog oficial")
     spinner.start()
-    core.conteudo_changelog = core.fetch_url(core.URL_CHANGELOG)
+    core.conteudo_changelog = _cached_fetch(cache, core.URL_CHANGELOG, logger)
     if not core.conteudo_changelog:
         spinner.stop(success=False, final_msg="Falha ao buscar o changelog oficial")
         print(f"{core.CLR_BLUE}Consulte: {core.obter_url_changelog('hub')}{core.CLR_RESET}")
@@ -186,18 +224,18 @@ def _show_changelog() -> int:
     return 0 if core.consultar_changelog() else 1
 
 
-def _load_remote_catalog() -> bool:
+def _load_remote_catalog(cache: cache_module.TextCache, logger) -> bool:
     spinner = core.TerminalSpinner("Buscando versões e mapeando dependências dinâmicas")
     spinner.start()
-    html_content = core.fetch_url("https://antigravity.google/download")
+    html_content = _cached_fetch(cache, "https://antigravity.google/download", logger)
     if not html_content:
         spinner.stop(success=False, final_msg="Falha ao buscar a página de downloads")
         return False
     core.conteudo_total = html_content
     for js in core.re.findall(r'(?:src|href)="([^"]+\.js)"', html_content):
         js_url = js if js.startswith(("http://", "https://")) else f"https://antigravity.google/{js.lstrip('/')}"
-        core.conteudo_total += "\n" + core.fetch_url(js_url)
-    core.conteudo_changelog = core.fetch_url(core.URL_CHANGELOG)
+        core.conteudo_total += "\n" + _cached_fetch(cache, js_url, logger)
+    core.conteudo_changelog = _cached_fetch(cache, core.URL_CHANGELOG, logger)
     spinner.stop(success=True, final_msg="Versões, links e changelog carregados com sucesso!")
     return True
 
@@ -226,26 +264,111 @@ def _begin_mutation(paths: ScopePaths, needs_temporary: bool = False) -> bool:
     return True
 
 
-def _run_update(target: str, force: bool, paths: ScopePaths) -> int:
+def _settings_for_command(namespace: argparse.Namespace, configured: settings_module.Settings):
+    updates = {}
+    if getattr(namespace, "channel", None):
+        updates["channel"] = namespace.channel
+    if getattr(namespace, "policy", None):
+        updates["policy"] = namespace.policy
+    return settings_module.validate(replace(configured, **updates))
+
+
+def _process_remote_apps(target: str, configured: settings_module.Settings, force: bool = False):
+    results = []
+    if target in ("both", "hub"):
+        results.append(
+            core.atualizar_aplicativo(
+                "Antigravity",
+                "antigravity-hub",
+                "hub",
+                forcar=force,
+                canal=configured.channel,
+                politica=configured.policy,
+                versao_fixada=configured.pin_hub,
+            )
+        )
+    if target in ("both", "ide"):
+        results.append(
+            core.atualizar_aplicativo(
+                "Antigravity_IDE",
+                "stable",
+                "ide",
+                forcar=force,
+                canal=configured.channel,
+                politica=configured.policy,
+                versao_fixada=configured.pin_ide,
+            )
+        )
+    return results
+
+
+def _run_update(
+    target: str,
+    force: bool,
+    paths: ScopePaths,
+    configured: settings_module.Settings,
+    cache: cache_module.TextCache,
+    logger,
+) -> int:
     if not _begin_mutation(paths, needs_temporary=True):
         return 1
     try:
         core.exibir_diagnosticos()
-        if not _load_remote_catalog():
+        if not _load_remote_catalog(cache, logger):
             return 1
-        results = []
-        if target in ("both", "hub"):
-            results.append(core.atualizar_aplicativo("Antigravity", "antigravity-hub", "hub", forcar=force))
-        if target in ("both", "ide"):
-            results.append(core.atualizar_aplicativo("Antigravity_IDE", "stable", "ide", forcar=force))
+        results = _process_remote_apps(target, configured, force=force)
         success = all(results)
+        if success:
+            for app in _selected_apps(target):
+                core.podar_versoes(app, configured.retention)
         if success:
             print(f"\n{core.CLR_GREEN}Processo concluído com sucesso!{core.CLR_RESET}")
         else:
             print(f"\n{core.CLR_FAIL}Processo concluído com falhas.{core.CLR_RESET}")
+        observability.event(
+            logger,
+            "update_completed",
+            success=success,
+            scope=paths.scope,
+            channel=configured.channel,
+            policy=configured.policy,
+        )
+        observability.notify(
+            configured.notifications,
+            "Antigravity Updater",
+            "Atualização concluída." if success else "A atualização terminou com falhas.",
+        )
         return core.codigo_saida(success)
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"{core.CLR_FAIL}Erro durante a atualização: {error}{core.CLR_RESET}")
+        observability.event(logger, "update_failed", scope=paths.scope, error=str(error))
+        observability.notify(
+            configured.notifications,
+            "Antigravity Updater",
+            "A atualização terminou com falhas.",
+        )
+        return 1
     finally:
         core.liberar_recursos()
+
+
+def _run_check(
+    target: str,
+    configured: settings_module.Settings,
+    cache: cache_module.TextCache,
+    logger,
+) -> int:
+    checking = replace(configured, policy="notify-only")
+    if not _load_remote_catalog(cache, logger):
+        return 1
+    success = all(_process_remote_apps(target, checking))
+    observability.event(logger, "check_completed", success=success, channel=checking.channel)
+    observability.notify(
+        checking.notifications,
+        "Antigravity Updater",
+        "Verificação de versões concluída." if success else "A verificação de versões falhou.",
+    )
+    return core.codigo_saida(success)
 
 
 def _run_mutation(namespace: argparse.Namespace, paths: ScopePaths) -> int:
@@ -296,6 +419,85 @@ def _run_mutation(namespace: argparse.Namespace, paths: ScopePaths) -> int:
         return 1
     finally:
         core.liberar_recursos()
+
+
+def _run_config(namespace: argparse.Namespace, paths: ScopePaths) -> int:
+    if namespace.action != "set" and (namespace.key is not None or namespace.value is not None):
+        print(f"{core.CLR_FAIL}Erro: {namespace.action} não aceita KEY ou VALUE.{core.CLR_RESET}")
+        return 1
+    if namespace.action == "path":
+        print(paths.config_file)
+        return 0
+    if namespace.action == "show":
+        try:
+            current = settings_module.load(paths.config_file)
+        except ValueError as error:
+            print(f"{core.CLR_FAIL}Erro: {error}{core.CLR_RESET}")
+            return 1
+        print(json.dumps(settings_module.public_dict(current), ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    if not _begin_mutation(paths):
+        return 1
+    try:
+        if namespace.action == "reset":
+            if paths.config_file.is_dir() and not paths.config_file.is_symlink():
+                raise ValueError(f"O caminho de configuração não é um arquivo: {paths.config_file}")
+            if paths.config_file.exists() or paths.config_file.is_symlink():
+                paths.config_file.unlink()
+            print("Configuração restaurada para os padrões.")
+            return 0
+        if not namespace.key or namespace.value is None:
+            raise ValueError("config set exige KEY e VALUE.")
+        current = settings_module.load(paths.config_file)
+        updated = settings_module.with_value(current, namespace.key, namespace.value)
+        settings_module.save(
+            paths.config_file,
+            updated,
+            mode=0o644 if paths.scope == "system" else 0o600,
+            directory_mode=0o755 if paths.scope == "system" else 0o700,
+        )
+        print(f"{namespace.key}={settings_module.public_dict(updated)[namespace.key]}")
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"{core.CLR_FAIL}Erro: {error}{core.CLR_RESET}")
+        return 1
+    finally:
+        core.liberar_recursos()
+
+
+def _run_cache(namespace: argparse.Namespace, paths: ScopePaths, cache: cache_module.TextCache) -> int:
+    if namespace.action == "status":
+        stats = cache.stats()
+        print(json.dumps({"path": str(paths.cache_dir), **stats}, ensure_ascii=False, sort_keys=True))
+        return 0
+    if not _begin_mutation(paths):
+        return 1
+    try:
+        removed = cache.clear()
+        print(f"Cache limpo: {removed} arquivo(s) removido(s).")
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"{core.CLR_FAIL}Erro: {error}{core.CLR_RESET}")
+        return 1
+    finally:
+        core.liberar_recursos()
+
+
+def _show_logs(namespace: argparse.Namespace, paths: ScopePaths) -> int:
+    if namespace.tail < 1 or namespace.tail > 1000:
+        print(f"{core.CLR_FAIL}Erro: --tail precisa estar entre 1 e 1000.{core.CLR_RESET}")
+        return 1
+    try:
+        if paths.log_file.is_symlink() or not paths.log_file.is_file():
+            print("Nenhum evento registrado.")
+            return 0
+        with paths.log_file.open("r", encoding="utf-8") as handle:
+            for line in deque(handle, maxlen=namespace.tail):
+                print(line, end="")
+        return 0
+    except OSError as error:
+        print(f"{core.CLR_FAIL}Erro ao ler logs: {error}{core.CLR_RESET}")
+        return 1
 
 
 def _interactive_request() -> argparse.Namespace:
@@ -351,26 +553,66 @@ def run(namespace: argparse.Namespace) -> int:
     if namespace.command == "exit":
         print(f"\n{core.CLR_BLUE}Saindo sem realizar alterações.{core.CLR_RESET}\n")
         return 0
-    if namespace.command == "changelog":
-        return _show_changelog()
     paths = resolve_scope(getattr(namespace, "scope", "system"))
     core.configurar_caminhos(paths.base_dir, paths.lock_file, paths.launcher_dir)
+    if namespace.command == "config":
+        logger = observability.configure(paths.log_file, "INFO")
+        observability.event(logger, "command_started", command="config", scope=paths.scope)
+        result = _run_config(namespace, paths)
+        observability.event(
+            logger,
+            "command_finished",
+            command="config",
+            scope=paths.scope,
+            exit_code=result,
+        )
+        return result
+    try:
+        configured = settings_module.load(paths.config_file)
+        configured = _settings_for_command(namespace, configured)
+    except ValueError as error:
+        print(f"{core.CLR_FAIL}Erro na configuração: {error}{core.CLR_RESET}")
+        return 1
+    logger = observability.configure(paths.log_file, configured.log_level)
+    observability.event(logger, "command_started", command=namespace.command, scope=paths.scope)
+    cache = cache_module.TextCache(paths.cache_dir, configured.cache_ttl)
+
+    def finish(code: int) -> int:
+        observability.event(
+            logger,
+            "command_finished",
+            command=namespace.command,
+            scope=paths.scope,
+            exit_code=code,
+        )
+        return code
+
+    if namespace.command == "changelog":
+        return finish(_show_changelog(cache, logger))
+    if namespace.command == "cache":
+        return finish(_run_cache(namespace, paths, cache))
+    if namespace.command == "logs":
+        return finish(_show_logs(namespace, paths))
     if namespace.command in ("current", "list"):
         try:
             core.exibir_estado_aplicativos(
                 _selected_apps(namespace.target),
                 detalhado=namespace.command == "list",
             )
-            return 0
+            return finish(0)
         except OSError as error:
             print(f"{core.CLR_FAIL}Erro ao consultar versões: {error}{core.CLR_RESET}")
-            return 1
+            return finish(1)
+    if namespace.command == "check":
+        return finish(_run_check(namespace.target, configured, cache, logger))
     if namespace.command == "update":
-        return _run_update(namespace.target, namespace.force, paths)
+        if configured.policy == "notify-only":
+            return finish(_run_check(namespace.target, configured, cache, logger))
+        return finish(_run_update(namespace.target, namespace.force, paths, configured, cache, logger))
     if namespace.command in ("rollback", "prune", "uninstall", "launcher"):
-        return _run_mutation(namespace, paths)
+        return finish(_run_mutation(namespace, paths))
     if namespace.command == "systemd":
-        return _run_systemd(namespace, paths)
+        return finish(_run_systemd(namespace, paths))
     raise ValueError(f"Comando desconhecido: {namespace.command}")
 
 

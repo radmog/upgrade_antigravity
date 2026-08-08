@@ -1,6 +1,6 @@
 # Arquitetura
 
-## Estado na versão 0.6.0 (M5)
+## Estado na versão 0.7.0 (M6)
 
 O repositório oferece duas entradas compatíveis para uma única implementação:
 
@@ -14,9 +14,11 @@ catálogo do escopo selecionado; se a verificação posterior falhar, o link
 anterior é restaurado automaticamente.
 
 O pacote `antigravity_updater` separa a análise e política da CLI (`cli.py`) do
-motor operacional (`core.py`). `paths.py` resolve os escopos de instalação sem
-efeitos colaterais, e `systemd.py` gera e gerencia as unidades Linux. O pacote
-pode ser importado sem verificar privilégios ou criar diretórios. A CLI
+motor operacional (`core.py`). `paths.py` resolve os escopos de instalação,
+`settings.py` valida configuração, `cache.py` mantém metadados HTTP,
+`observability.py` centraliza logs e notificações, e `systemd.py` gerencia as
+unidades Linux. O pacote pode ser importado sem verificar privilégios ou criar
+diretórios. A CLI
 classifica os comandos antes de provocar
 efeitos: `current`, `list` e `changelog` são consultas sem root; `update`,
 `rollback`, `prune`, `uninstall` e `launcher` exigem root apenas no escopo de
@@ -25,8 +27,8 @@ privilégios.
 
 ## Compatibilidade da CLI
 
-A forma canônica usa subcomandos (`update`, `changelog`, `current`, `list`,
-`rollback` e `prune`). A camada de normalização aceita as opções históricas,
+A forma canônica usa subcomandos para atualização, consulta, histórico,
+integração Linux, configuração, cache e logs. A camada de normalização aceita as opções históricas,
 incluindo `--both`, `--hub`, `--ide`, `--reinstall` e as opções numéricas do
 menu. Tanto `upgrade.py` quanto `upgrade.sh` chegam ao mesmo parser e ao mesmo
 motor, evitando divergência de segurança e comportamento entre linguagens.
@@ -49,6 +51,29 @@ remove um timer gerenciado existente, salvo com `--keep-systemd`.
 selecionado, executa `daemon-reload` e habilita o timer. No escopo de usuário, o
 comando usa `systemctl --user` e grava no diretório de unidades XDG; no escopo
 global, usa o gerenciador de sistema e requer root.
+
+## Políticas e observabilidade do M6
+
+Cada escopo possui configuração própria em JSON. O esquema fechado define canal
+(`stable` ou `preview`), política (`latest` ou `notify-only`), retenção, TTL do
+cache, notificações, nível de log e pins independentes para Hub e IDE. Opções da
+CLI podem sobrescrever canal e política apenas durante uma execução.
+
+A seleção de versão primeiro restringe aplicativo e arquitetura, depois aplica
+o pin e o canal e, por fim, ordena os candidatos por versão. `stable` rejeita
+marcadores de pré-lançamento; `preview` também considera esses candidatos. A
+política `notify-only` encerra antes de qualquer download, launcher ou alteração
+do catálogo. `check` força essa política e nunca exige root.
+
+Páginas de download, scripts de metadados e changelog passam por um cache
+textual com TTL. Hit, miss e fallback expirado são registrados no log. Pacotes
+de instalação não entram nesse cache e continuam seguindo o pipeline protegido
+de download e checksum.
+
+Cada comando registra início e término em JSON Lines. Atualizações e verificações
+também registram o resultado e podem emitir notificação desktop. Os arquivos de
+log giram ao atingir 1 MiB, mantendo três backups; falhas de log ou notificação
+não impedem a operação principal.
 
 ## Pipeline de instalação do M2
 

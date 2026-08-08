@@ -45,6 +45,19 @@ calendário e executam a mesma CLI com `NoNewPrivileges=true` e `UMask=0077`.
 Timers de usuário registram os caminhos XDG resolvidos para não mudar o local de
 instalação entre a sessão interativa e a execução agendada.
 
+Desde a versão 0.7.0, a configuração passa por esquema fechado e validação de
+tipos, limites e valores antes de influenciar uma atualização. Arquivos do
+usuário usam modo `0600`; a configuração global, que não admite segredos, usa
+`0644` para preservar consultas sem root. Pins não aceitam componentes de
+caminho.
+
+O cache usa nomes derivados de SHA-256 da URL, diretório `0700`, arquivos
+`0600` e publicação por rename. Entradas só são aceitas quando corpo e metadados
+regulares correspondem à URL solicitada. Conteúdo expirado é usado como fallback
+somente quando uma nova busca falha. Logs JSONL são privados, rotativos e
+recusam symlinks. Notificações usam `notify-send` com vetor de argumentos, sem
+shell, têm timeout e nunca alteram o código de saída da operação principal.
+
 Ainda não existe uma assinatura criptográfica independente: quando o servidor
 não oferece checksum, o hash calculado serve para auditoria e detecção posterior,
 mas não autentica a origem.

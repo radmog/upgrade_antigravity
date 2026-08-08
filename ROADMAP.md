@@ -34,7 +34,7 @@ existente até que uma migração seja documentada.
 
 ## M6 — Políticas e observabilidade (0.7.0)
 
-- [ ] Canais, política de versões, configuração, logs, notificações e cache.
+- [x] Canais, política de versões, configuração, logs, notificações e cache.
 
 ## M7 — Consolidação (1.0.0)
 

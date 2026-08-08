@@ -30,7 +30,7 @@ def render_units(paths: ScopePaths, python: Path, entrypoint: Path, calendar: st
     if paths.scope == "user":
         xdg_values = (
             ("XDG_DATA_HOME", paths.launcher_dir.parent),
-            ("XDG_STATE_HOME", paths.lock_file.parent.parent),
+            ("XDG_STATE_HOME", paths.state_dir.parent),
             ("XDG_CONFIG_HOME", paths.unit_dir.parents[1]),
         )
         environment_lines = "".join(

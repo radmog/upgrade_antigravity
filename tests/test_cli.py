@@ -99,5 +99,9 @@ def test_upgrade_py_encaminha_help_para_cli_estruturada():
         "uninstall",
         "launcher",
         "systemd",
+        "check",
+        "config",
+        "cache",
+        "logs",
     ):
         assert command in result.stdout

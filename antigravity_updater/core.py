@@ -6,6 +6,7 @@ import atexit
 import fcntl
 import hashlib
 import json
+import logging
 import posixpath
 import tempfile
 import urllib.request
@@ -48,6 +49,7 @@ MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 12 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 200_000
 LOCK_HANDLE = None
+LOGGER = logging.getLogger("antigravity_updater")
 
 
 def configurar_caminhos(diretorio_base, arquivo_lock, diretorio_launchers):
@@ -751,8 +753,17 @@ def ler_numero_versao(caminho):
 def chave_versao(valor):
     numeros = re.match(r"^(\d+)\.(\d+)\.(\d+)(.*)$", valor)
     if not numeros:
-        return (0, 0, 0, valor)
-    return tuple(int(item) for item in numeros.groups()[:3]) + (numeros.group(4),)
+        return (0, 0, 0, 0, 0, 0, valor)
+    principal = tuple(int(item) for item in numeros.groups()[:3])
+    sufixo = numeros.group(4).lower()
+    pre = re.search(r"(?:^|[-._])(alpha|beta|preview|canary|insider|rc)(\d*)", sufixo)
+    if pre:
+        ranking = {"alpha": 0, "canary": 0, "insider": 0, "beta": 1, "preview": 1, "rc": 2}
+        numero = int(pre.group(2)) if pre.group(2) else 0
+        return principal + (0, ranking[pre.group(1)], numero, sufixo)
+    build = re.search(r"\d+", sufixo)
+    numero_build = int(build.group(0)) if build else 0
+    return principal + (1, 0, numero_build, sufixo)
 
 
 def listar_versoes(nome_app):
@@ -952,19 +963,55 @@ def selecionar_aplicativos(argumentos):
     return ["Antigravity", "Antigravity_IDE"]
 
 
+def extrair_versao_url(url):
+    match = re.search(r'/([0-9]+\.[0-9]+\.[0-9]+[^/]*)', url)
+    return match.group(1) if match else None
+
+
+def selecionar_url_download(conteudo, padrao_url, arquitetura, canal="stable", versao_fixada=None):
+    if canal not in ("stable", "preview"):
+        raise ValueError(f"Canal desconhecido: {canal}")
+    candidatos = []
+    for url in set(re.findall(r'https://[^\s"]+\.tar\.gz', conteudo)):
+        if padrao_url not in url or arquitetura not in url:
+            continue
+        versao = extrair_versao_url(url)
+        if not versao:
+            continue
+        if versao_fixada and versao != versao_fixada:
+            continue
+        preview = chave_versao(versao)[3] == 0
+        if canal == "stable" and preview:
+            continue
+        candidatos.append((versao, url))
+    if not candidatos:
+        return None
+    return max(candidatos, key=lambda item: chave_versao(item[0]))[1]
+
+
 # Função interna para processar cada um dos aplicativos
-def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
+def atualizar_aplicativo(
+    nome_app,
+    padrao_url,
+    aba_changelog,
+    forcar=False,
+    canal="stable",
+    politica="latest",
+    versao_fixada=None,
+):
     print(f"\n{CLR_BLUE}⚡ Analisando: {nome_app} ({padrao_url}) {CLR_RESET}")
     print(f"  {CLR_GRAY}----------------------------------------{CLR_RESET}")
 
-    # 1. Extrai todas as URLs que terminam em .tar.gz
-    urls = re.findall(r'https://[^\s"]+\.tar\.gz', conteudo_total)
-    
-    url_download = None
-    for url in urls:
-        if padrao_url in url and ARCH_ALVO in url:
-            url_download = url
-            break
+    if politica not in ("latest", "notify-only"):
+        print(f"  {CLR_FAIL}Política de versão desconhecida: {politica}.{CLR_RESET}")
+        return False
+    url_download = selecionar_url_download(
+        conteudo_total,
+        padrao_url,
+        ARCH_ALVO,
+        canal=canal,
+        versao_fixada=versao_fixada,
+    )
 
     if not url_download:
         print(f"  {CLR_WARNING}⚠ Link de download não disponível para {nome_app} ({ARCH_ALVO}).{CLR_RESET}")
@@ -977,11 +1024,10 @@ def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
         return False
 
     # 2. Extrair a versão a partir do link de download
-    match_versao = re.search(r'/([0-9]+\.[0-9]+\.[0-9]+[^/]*)', url_download)
-    if not match_versao:
+    versao_web = extrair_versao_url(url_download)
+    if not versao_web:
         print(f"  {CLR_WARNING}⚠ Não foi possível extrair a versão de {nome_app} do link.{CLR_RESET}")
         return False
-    versao_web = match_versao.group(1)
 
     # 3. Verificar versão local atual e data de instalação
     pasta_app = os.path.join(DIRETORIO_BASE, nome_app)
@@ -1007,7 +1053,27 @@ def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
 
     print(f"  {CLR_WHITE}Versão na Web: {CLR_CYAN}{versao_web}{CLR_RESET}{CLR_GRAY}{str_data_web}{CLR_RESET}")
     print(f"  {CLR_WHITE}Versão Local:  {CLR_GRAY}{versao_local}{str_data_local}{CLR_RESET}")
+    LOGGER.info(
+        "version_evaluated",
+        extra={
+            "event_fields": {
+                "app": nome_app,
+                "local_version": versao_local,
+                "remote_version": versao_web,
+                "channel": canal,
+                "policy": politica,
+                "pinned": versao_fixada,
+            }
+        },
+    )
     exibir_notas_versao(nome_app, aba_changelog, versao_web)
+
+    if politica == "notify-only":
+        if versao_local != versao_web:
+            print(f"  {CLR_WARNING}➜ Versão disponível; política notify-only não altera a instalação.{CLR_RESET}")
+        else:
+            print(f"  {CLR_GREEN}✓ A versão ativa atende à política configurada.{CLR_RESET}")
+        return True
 
     # 5. Tomada de Decisão e Atualização
     if versao_local != versao_web or forcar:

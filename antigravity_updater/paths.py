@@ -11,10 +11,24 @@ class ScopePaths:
     scope: str
     base_dir: Path
     lock_file: Path
+    state_dir: Path
     launcher_dir: Path
     unit_dir: Path
+    config_dir: Path
     systemctl: Tuple[str, ...]
     requires_root: bool
+
+    @property
+    def config_file(self) -> Path:
+        return self.config_dir / "config.json"
+
+    @property
+    def cache_dir(self) -> Path:
+        return self.state_dir / "cache"
+
+    @property
+    def log_file(self) -> Path:
+        return self.state_dir / "logs" / "updater.jsonl"
 
 
 def _xdg_path(environment: Mapping[str, str], variable: str, fallback: Path) -> Path:
@@ -36,8 +50,10 @@ def resolve_scope(
             scope="system",
             base_dir=Path("/opt/antigravity_apps"),
             lock_file=Path("/run/lock/antigravity-updater.lock"),
+            state_dir=Path("/var/lib/antigravity-updater"),
             launcher_dir=Path("/usr/local/share/applications"),
             unit_dir=Path("/etc/systemd/system"),
+            config_dir=Path("/etc/antigravity-updater"),
             systemctl=("systemctl",),
             requires_root=True,
         )
@@ -51,8 +67,10 @@ def resolve_scope(
         scope="user",
         base_dir=data_home / "antigravity-updater" / "apps",
         lock_file=state_home / "antigravity-updater" / "updater.lock",
+        state_dir=state_home / "antigravity-updater",
         launcher_dir=data_home / "applications",
         unit_dir=config_home / "systemd" / "user",
+        config_dir=config_home / "antigravity-updater",
         systemctl=("systemctl", "--user"),
         requires_root=False,
     )
