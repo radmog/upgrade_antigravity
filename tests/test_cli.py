@@ -89,5 +89,15 @@ def test_upgrade_py_encaminha_help_para_cli_estruturada():
         check=False,
     )
     assert result.returncode == 0
-    for command in ("update", "changelog", "current", "list", "rollback", "prune"):
+    for command in (
+        "update",
+        "changelog",
+        "current",
+        "list",
+        "rollback",
+        "prune",
+        "uninstall",
+        "launcher",
+        "systemd",
+    ):
         assert command in result.stdout

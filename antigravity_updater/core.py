@@ -39,6 +39,7 @@ CLR_WHITE = "\033[37m"
 DIRETORIO_BASE = "/opt/antigravity_apps"
 PASTA_TMP = None
 ARQUIVO_LOCK = "/run/lock/antigravity-updater.lock"
+DIRETORIO_LAUNCHERS = "/usr/local/share/applications"
 URL_CHANGELOG = "https://antigravity.google/changelog"
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3
@@ -47,6 +48,14 @@ MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
 MAX_EXTRACTED_BYTES = 12 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 200_000
 LOCK_HANDLE = None
+
+
+def configurar_caminhos(diretorio_base, arquivo_lock, diretorio_launchers):
+    """Configura o motor para o escopo selecionado pela CLI."""
+    global DIRETORIO_BASE, ARQUIVO_LOCK, DIRETORIO_LAUNCHERS
+    DIRETORIO_BASE = os.fspath(diretorio_base)
+    ARQUIVO_LOCK = os.fspath(arquivo_lock)
+    DIRETORIO_LAUNCHERS = os.fspath(diretorio_launchers)
 
 def verificar_privilegios():
     """Interrompe a execução quando o instalador não possui privilégios."""
@@ -89,9 +98,10 @@ def limpar_diretorio_temporario():
     PASTA_TMP = None
 
 
-def adquirir_bloqueio(caminho=ARQUIVO_LOCK):
+def adquirir_bloqueio(caminho=None):
     """Mantém um lock exclusivo enquanto o processo estiver em execução."""
     global LOCK_HANDLE
+    caminho = ARQUIVO_LOCK if caminho is None else caminho
     flags = os.O_CREAT | os.O_RDWR
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -496,76 +506,64 @@ def download_com_progresso(url, dest_path, app_name, checksum_esperado=None):
     print(f"  {CLR_FAIL}Erro ao fazer o download após {HTTP_RETRIES} tentativas: {ultimo_erro}{CLR_RESET}")
     return False
 
-# Cria atalho no Desktop do usuário
-def criar_atalho(nome_app):
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        try:
-            import subprocess
-            desktop_dir = subprocess.check_output(["sudo", "-u", sudo_user, "xdg-user-dir", "DESKTOP"]).decode("utf-8").strip()
-        except Exception:
-            desktop_dir = f"/home/{sudo_user}/Desktop"
-    else:
-        try:
-            import subprocess
-            desktop_dir = subprocess.check_output(["xdg-user-dir", "DESKTOP"]).decode("utf-8").strip()
-        except Exception:
-            desktop_dir = os.path.expanduser("~/Desktop")
-        
-    if not os.path.exists(desktop_dir):
-        return False
-        
-    shortcut_path = os.path.join(desktop_dir, f"{nome_app}.desktop")
-    
+def _dados_launcher(nome_app):
     if nome_app == "Antigravity":
-        exec_path = os.path.join(DIRETORIO_BASE, "Antigravity", "antigravity")
-        icon_path = os.path.join(DIRETORIO_BASE, "Antigravity", "antigravity-logo.png")
-        fallback_icon = os.path.join(DIRETORIO_BASE, "Antigravity_IDE", "resources", "app", "out", "vs", "platform", "browserOnboarding", "static", "antigravity.svg")
-    else:
-        exec_path = os.path.join(DIRETORIO_BASE, "Antigravity_IDE", "antigravity-ide")
-        icon_path = os.path.join(DIRETORIO_BASE, "Antigravity_IDE", "antigravity-logo.png")
-        fallback_icon = os.path.join(DIRETORIO_BASE, "Antigravity_IDE", "resources", "app", "out", "media", "code-icon.svg")
+        return "antigravity-hub.desktop", "antigravity", "Antigravity Hub"
+    if nome_app == "Antigravity_IDE":
+        return "antigravity-ide.desktop", "antigravity-ide", "Antigravity IDE"
+    raise ValueError(f"Aplicativo desconhecido: {nome_app}")
 
-    if not os.path.exists(icon_path):
-        try:
-            # Baixa a imagem oficial do logo
-            req = urllib.request.Request("https://antigravity.google/assets/image/antigravity-logo.png", headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req) as response, open(icon_path, "wb") as out_file:
-                shutil.copyfileobj(response, out_file)
-        except Exception:
-            if os.path.exists(fallback_icon):
-                icon_path = fallback_icon
-            else:
-                icon_path = "system-run"
-            
+
+def caminho_launcher(nome_app):
+    arquivo, _executavel, _titulo = _dados_launcher(nome_app)
+    return os.path.join(DIRETORIO_LAUNCHERS, arquivo)
+
+
+def criar_atalho(nome_app):
+    """Instala um launcher XDG para uma versão já ativa."""
+    _arquivo, executavel, titulo = _dados_launcher(nome_app)
+    exec_path = os.path.join(DIRETORIO_BASE, nome_app, executavel)
+    if not os.path.isfile(exec_path) or not os.access(exec_path, os.X_OK):
+        return False
+    icon_path = os.path.join(DIRETORIO_BASE, nome_app, "antigravity-logo.png")
+    if not os.path.isfile(icon_path):
+        icon_path = "system-run"
+    escaped_exec = exec_path.replace("\\", "\\\\").replace('"', '\\"')
     content = f"""[Desktop Entry]
 Version=1.0
 Type=Application
-Name={nome_app.replace('_', ' ')}
-Comment=Executar {nome_app.replace('_', ' ')}
-Exec="{exec_path}"
+Name={titulo}
+Comment=Executar {titulo}
+Exec="{escaped_exec}"
+TryExec="{escaped_exec}"
 Icon={icon_path}
 Terminal=false
 Categories=Development;
 """
+    os.makedirs(DIRETORIO_LAUNCHERS, mode=0o755, exist_ok=True)
+    destino = caminho_launcher(nome_app)
+    temporario = f"{destino}.tmp-{os.getpid()}"
     try:
-        spinner_shortcut = TerminalSpinner(f"Criando atalho de desktop para {nome_app}")
-        spinner_shortcut.start()
-        with open(shortcut_path, "w") as f:
-            f.write(content)
-        os.chmod(shortcut_path, 0o755)
-        if sudo_user:
-            try:
-                import pwd
-                pw = pwd.getpwnam(sudo_user)
-                os.chown(shortcut_path, pw.pw_uid, pw.pw_gid)
-            except Exception:
-                pass
-        spinner_shortcut.stop(success=True, final_msg=f"Atalho de desktop criado para {nome_app}")
+        with open(temporario, "w", encoding="utf-8") as arquivo:
+            arquivo.write(content)
+            arquivo.flush()
+            os.fsync(arquivo.fileno())
+        os.chmod(temporario, 0o644)
+        os.replace(temporario, destino)
         return True
-    except Exception as e:
-        spinner_shortcut.stop(success=False, final_msg=f"Erro ao criar atalho no desktop: {e}")
-        return False
+    finally:
+        if os.path.exists(temporario):
+            os.unlink(temporario)
+
+
+def remover_atalho(nome_app):
+    destino = caminho_launcher(nome_app)
+    if os.path.isdir(destino) and not os.path.islink(destino):
+        raise RuntimeError(f"O caminho do launcher não é um arquivo: {destino}")
+    if os.path.lexists(destino):
+        os.unlink(destino)
+        return True
+    return False
 
 
 def _partes_caminho_tar(caminho):
@@ -885,6 +883,46 @@ def podar_versoes(nome_app, manter=2):
             shutil.rmtree(caminho)
             removidas.append(item["version"])
     return removidas
+
+
+def desinstalar_aplicativo(nome_app):
+    """Remove somente caminhos pertencentes ao catálogo gerenciado."""
+    link = os.path.join(DIRETORIO_BASE, nome_app)
+    historico = pasta_versoes(nome_app)
+    if os.path.lexists(link):
+        raiz = os.path.realpath(historico)
+        destino = os.path.realpath(link)
+        link_gerenciado = (
+            os.path.islink(link)
+            and destino != raiz
+            and os.path.commonpath((raiz, destino)) == raiz
+        )
+        if not link_gerenciado:
+            raise RuntimeError(f"O caminho ativo não é um link gerenciado: {link}")
+    if os.path.lexists(historico):
+        if os.path.islink(historico) or not os.path.isdir(historico):
+            raise RuntimeError(f"O histórico não é um diretório gerenciado: {historico}")
+    estado = caminho_estado(nome_app)
+    if os.path.isdir(estado) and not os.path.islink(estado):
+        raise RuntimeError(f"O estado não é um arquivo gerenciado: {estado}")
+    launcher = caminho_launcher(nome_app)
+    if os.path.isdir(launcher) and not os.path.islink(launcher):
+        raise RuntimeError(f"O caminho do launcher não é um arquivo: {launcher}")
+
+    alterado = False
+    if os.path.lexists(link):
+        os.unlink(link)
+        alterado = True
+    if os.path.lexists(historico):
+        shutil.rmtree(historico)
+        alterado = True
+    if os.path.lexists(estado):
+        os.unlink(estado)
+        alterado = True
+    if os.path.lexists(launcher):
+        os.unlink(launcher)
+        alterado = True
+    return alterado
 
 
 def exibir_estado_aplicativos(nomes, detalhado=False):

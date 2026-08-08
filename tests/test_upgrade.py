@@ -249,7 +249,8 @@ def test_staging_registra_manifesto_e_publica_versao(updater_module, monkeypatch
     assert (Path(destino) / "version.txt").read_text(encoding="utf-8") == "1.2.3\n"
 
 
-def test_readme_nao_executa_servico_com_usuario_sem_privilegio():
+def test_readme_documenta_systemd_gerenciado_por_escopo():
     readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
     assert "User=rguedes" not in readme
-    assert readme.count("User=root") == 2
+    assert "systemd install --user" in readme
+    assert "systemd install --system" in readme

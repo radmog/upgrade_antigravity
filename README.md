@@ -18,7 +18,10 @@ Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o 
 - **Gerenciamento de Versões**: Mantém um histórico de versões instaladas dentro de subpastas específicas (ex: `Antigravity_VERSOES/Antigravity-X.Y.Z`).
 - **Links Simbólicos Dinâmicos**: Atualiza um link simbólico que aponta sempre para a versão ativa/mais recente, garantindo que atalhos e referências ao executável nunca fiquem obsoletos.
 - **Feedback Visual Avançado**: Inclui barras de progresso animadas para downloads e indicadores de carregamento (spinners) para operações de extração e linkagem.
-- **Integração com o Desktop**: Cria automaticamente arquivos `.desktop` no Desktop do usuário com o ícone oficial (baixado sob demanda) ou ícones de fallback locais, permitindo iniciar as aplicações diretamente pelo menu do sistema operacional.
+- **Instalação por Usuário**: Usa diretórios XDG com `--user`, sem exigir root ou gravar em `/opt`.
+- **Desinstalação Segura**: Remove apenas links, históricos, estados e launchers previamente validados como gerenciados.
+- **Launchers XDG**: Publica atalhos no menu de aplicativos para o escopo selecionado.
+- **Systemd Gerenciado**: Instala, consulta e remove serviço/timer pelo próprio comando.
 
 ---
 
@@ -44,9 +47,10 @@ As duas entradas requerem Python 3; nenhuma dependência Python externa é
 necessária em tempo de execução.
 
 > [!IMPORTANT]
-> Como o diretório base de instalação é `/opt/antigravity_apps`, `update`,
-> `rollback` e `prune` exigem privilégios administrativos. As consultas
-> `current`, `list` e `changelog` podem ser executadas sem `sudo`.
+> O escopo padrão é `--system`, que usa `/opt/antigravity_apps`; suas operações
+> de escrita exigem privilégios administrativos. O escopo `--user` grava nos
+> diretórios XDG do usuário e não exige `sudo`. `current`, `list`, `changelog` e
+> `systemd status` são consultas e não elevam privilégios.
 
 ### Modo Interativo
 Ao rodar qualquer um dos scripts sem argumentos com `sudo`, um menu de seleção interativo colorido será exibido no terminal:
@@ -77,6 +81,9 @@ A sintaxe canônica usa subcomandos:
 sudo ./upgrade.py update --both
 sudo ./upgrade.sh update --both
 
+# Instalar ambos somente para o usuário atual, sem sudo
+./upgrade.py update --both --user
+
 # Para atualizar apenas o Antigravity (Hub)
 sudo ./upgrade.py update --hub
 
@@ -106,6 +113,9 @@ Os comandos abaixo não acessam a rede:
 ./upgrade.py list --hub
 ./upgrade.sh list --ide
 
+# Consultar a instalação do usuário em vez da instalação global
+./upgrade.py current --user
+
 # Voltar para a versão anterior registrada
 sudo ./upgrade.py rollback --hub
 sudo ./upgrade.sh rollback --hub
@@ -120,104 +130,71 @@ sudo ./upgrade.py prune 2
 `prune` sempre preserva a versão ativa e a anterior disponível para rollback;
 portanto, `--prune 1` ainda poderá conservar duas versões.
 
----
+### Desinstalação e launchers
 
-## 🔄 Atualização Automática via Systemd (`systemctl`)
+```bash
+# Remover apenas a instalação do usuário
+./upgrade.py uninstall --both --user
 
-Para manter o Antigravity e o Antigravity IDE atualizados em segundo plano no Linux sem intervenção manual, você pode configurar um serviço de sistema no Systemd utilizando um **timer** ou uma **execução na inicialização**.
+# Remover a instalação global
+sudo ./upgrade.py uninstall --both --system
 
-### Modos Possíveis de Configuração
+# Recriar ou remover launchers do menu de aplicativos
+./upgrade.py launcher install --both --user
+./upgrade.py launcher remove --both --user
+```
 
-#### Modo 1: Execução Periódica (Agendada via Systemd Timer)
-Neste modo, o Systemd executa o script de atualização de forma recorrente (ex: diariamente ou semanalmente) em um horário específico ou após um intervalo de tempo regular.
-
-1. **Criar o arquivo de serviço** (`/etc/systemd/system/antigravity-upgrade.service`):
-   ```ini
-   [Unit]
-   Description=Serviço de Atualização Automática do Antigravity
-   After=network-online.target
-   Wants=network-online.target
-
-   [Service]
-   Type=oneshot
-   # Ajuste o caminho para o local do seu script e selecione python3 ou bash
-   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py update --both
-   # O instalador atual grava em /opt e exige privilégios administrativos.
-   User=root
-   ```
-
-2. **Criar o arquivo de timer** (`/etc/systemd/system/antigravity-upgrade.timer`):
-   ```ini
-   [Unit]
-   Description=Timer para Atualização Automática do Antigravity
-
-   [Timer]
-   # Executa todos os dias às 02:00 da manhã
-   OnCalendar=*-*-* 02:00:00
-   # Garante que o serviço rodará mesmo se o computador estiver desligado no horário programado (roda logo após ligar)
-   Persistent=true
-
-   [Install]
-   WantedBy=timers.target
-   ```
-
-3. **Habilitar e iniciar o timer**:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now antigravity-upgrade.timer
-   ```
-
-#### Modo 2: Execução na Inicialização (Startup)
-Neste modo, o script verifica se há atualizações disponíveis toda vez que o sistema operacional é inicializado e o acesso à rede está pronto.
-
-1. **Criar o arquivo de serviço** (`/etc/systemd/system/antigravity-upgrade-startup.service`):
-   ```ini
-   [Unit]
-   Description=Verificação de Atualização do Antigravity na Inicialização
-   After=network-online.target
-   Wants=network-online.target
-
-   [Service]
-   Type=oneshot
-   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py update --both
-   # O instalador atual grava em /opt e exige privilégios administrativos.
-   User=root
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-
-2. **Habilitar o serviço**:
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable antigravity-upgrade-startup.service
-   ```
+Ao desinstalar ambos os aplicativos, um timer gerenciado no mesmo escopo também
+é removido para evitar reinstalação automática. Use `--keep-systemd` para
+preservá-lo.
 
 ---
 
-### 📊 Monitoramento e Logs
-Para verificar o status das execuções automáticas e acompanhar o andamento dos logs, use os comandos do `systemctl` e `journalctl`:
+## 🔄 Automação gerenciada com systemd
 
-- **Verificar status do Timer/Serviço**:
-  ```bash
-  systemctl status antigravity-upgrade.timer
-  systemctl status antigravity-upgrade.service
-  ```
-- **Visualizar os logs da última execução**:
-  ```bash
-  journalctl -u antigravity-upgrade.service -n 50
-  ```
+A própria CLI instala o serviço oneshot e o timer persistente. Mantenha o
+repositório ou a instalação da CLI no mesmo caminho depois de criar as unidades.
+
+```bash
+# Timer diário do usuário, sem sudo
+./upgrade.py systemd install --user
+
+# Timer global; exige root
+sudo ./upgrade.py systemd install --system
+
+# Usar outra expressão OnCalendar
+./upgrade.py systemd install --user --calendar "Mon..Fri 02:00"
+
+# Consultar o timer
+./upgrade.py systemd status --user
+systemctl --user list-timers antigravity-upgrade.timer
+
+# Remover serviço e timer
+./upgrade.py systemd remove --user
+```
+
+No escopo de usuário, as unidades ficam em
+`$XDG_CONFIG_HOME/systemd/user` (por padrão, `~/.config/systemd/user`) e executam
+`systemctl --user`. No escopo global, ficam em `/etc/systemd/system`. O timer
+preserva os caminhos XDG resolvidos durante a instalação e executa
+`update --both` no mesmo escopo.
 
 ---
 
-## 📁 Estrutura de Diretórios Gerada Localmente
+## 📁 Estrutura de diretórios
 
-Quando os scripts são executados, eles geram uma estrutura de arquivos local para organizar as versões instaladas. 
+No escopo de sistema, o catálogo permanece em `/opt/antigravity_apps`. No
+escopo de usuário, fica em
+`$XDG_DATA_HOME/antigravity-updater/apps` (por padrão,
+`~/.local/share/antigravity-updater/apps`). Dentro dele:
 
-- `Antigravity/` - Link simbólico para a versão ativa do Antigravity Hub.
-- `Antigravity_IDE/` - Link simbólico para a versão ativa do Antigravity IDE.
-- `Antigravity_VERSOES/` - Pasta com as diferentes versões baixadas do Antigravity Hub.
-- `Antigravity_IDE_VERSOES/` - Pasta com as diferentes versões baixadas do Antigravity IDE.
+- `Antigravity/` — link simbólico para a versão ativa do Hub.
+- `Antigravity_IDE/` — link simbólico para a versão ativa do IDE.
+- `Antigravity_VERSOES/` — histórico validado do Hub.
+- `Antigravity_IDE_VERSOES/` — histórico validado do IDE.
+
+Os launchers globais ficam em `/usr/local/share/applications`; os launchers do
+usuário ficam em `$XDG_DATA_HOME/applications`.
 
 ---
 

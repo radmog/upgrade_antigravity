@@ -30,7 +30,7 @@ existente até que uma migração seja documentada.
 
 ## M5 — Integração com Linux (0.6.0)
 
-- [ ] Instalação por usuário, desinstalação, launchers e systemd gerenciado.
+- [x] Instalação por usuário, desinstalação, launchers e systemd gerenciado.
 
 ## M6 — Políticas e observabilidade (0.7.0)
 

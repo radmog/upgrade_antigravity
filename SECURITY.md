@@ -8,7 +8,7 @@ incluindo versão afetada, impacto e passos mínimos para reprodução.
 
 ## Escopo atual
 
-As operações de instalação e gerenciamento são privilegiadas e devem ser
+As operações de instalação e gerenciamento alteram executáveis e devem ser
 executadas somente a partir de uma cópia confiável deste repositório. Desde a
 versão 0.3.0, cada atualização usa um diretório temporário privado e um lock
 exclusivo. Downloads são
@@ -32,6 +32,18 @@ consulta apenas o endpoint público de notas de versão. `update`, `rollback` e
 `prune` continuam exigindo root e usando o lock exclusivo antes de qualquer
 alteração. O wrapper Bash não possui lógica privilegiada própria: ele encaminha
 os argumentos para a implementação Python canônica.
+
+Desde a versão 0.6.0, operações com `--user` gravam somente nos diretórios XDG
+do usuário e usam um lock privado em `XDG_STATE_HOME`, sem elevar privilégios.
+O escopo `--system` preserva os caminhos globais e continua exigindo root para
+alterações. A desinstalação valida previamente links, histórico, estado e
+launcher e recusa caminhos que não pertençam ao catálogo gerenciado.
+
+Launchers são publicados atomicamente em `applications/` com modo `0644`. As
+unidades systemd também são escritas atomicamente, rejeitam quebras de linha no
+calendário e executam a mesma CLI com `NoNewPrivileges=true` e `UMask=0077`.
+Timers de usuário registram os caminhos XDG resolvidos para não mudar o local de
+instalação entre a sessão interativa e a execução agendada.
 
 Ainda não existe uma assinatura criptográfica independente: quando o servidor
 não oferece checksum, o hash calculado serve para auditoria e detecção posterior,
