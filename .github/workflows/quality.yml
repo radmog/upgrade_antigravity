@@ -22,9 +22,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck shfmt
       - name: Python syntax and lint
         run: |
-          python -m compileall -q upgrade.py tests
-          ruff check upgrade.py tests
-          mypy upgrade.py
+          python -m compileall -q upgrade.py antigravity_updater tests
+          ruff check upgrade.py antigravity_updater tests
+          mypy upgrade.py antigravity_updater
       - name: Shell syntax and lint
         run: |
           bash -n upgrade.sh
@@ -32,4 +32,3 @@ jobs:
           shfmt -d -i 4 -ci upgrade.sh
       - name: Tests
         run: pytest
-

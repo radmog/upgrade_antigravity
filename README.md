@@ -1,6 +1,6 @@
 # Antigravity Updater & Installer
 
-Este repositório contém scripts de automação projetados para gerenciar, instalar e atualizar o **Antigravity** (Hub) e o **Antigravity IDE** em sistemas baseados em Linux. O projeto oferece duas implementações equivalentes: uma em **Python 3** (`upgrade.py`) e outra em **Bash Shell** (`upgrade.sh`), permitindo flexibilidade dependendo do ambiente e das ferramentas instaladas.
+Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity** (Hub) e o **Antigravity IDE** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
 
 ## ⚡ Funcionalidades Principais
 
@@ -24,11 +24,11 @@ Este repositório contém scripts de automação projetados para gerenciar, inst
 
 ## 🛠️ Arquivos do Repositório
 
-### 1. [upgrade.py](file:///opt/antigravity_apps/upgrade.py)
-Script escrito em Python 3 utilizando apenas bibliotecas nativas (`urllib`, `tarfile`, `platform`, `threading`, etc.). Ideal para execução em ambientes que requerem multithreading para renderização do spinner animado ou processamento mais robusto.
+### 1. [upgrade.py](upgrade.py)
+Entrada compatível da CLI estruturada. A implementação está organizada no pacote [`antigravity_updater`](antigravity_updater), usando apenas a biblioteca padrão do Python em tempo de execução.
 
-### 2. [upgrade.sh](file:///opt/antigravity_apps/upgrade.sh)
-Script escrito em Bash Shell. Ideal para automações em servidores, containers ou ambientes mínimos onde o Python não está disponível. Utiliza comandos utilitários como `curl` para downloads e processamento de texto tradicional para raspagem de dados.
+### 2. [upgrade.sh](upgrade.sh)
+Wrapper Bash para automações existentes. Ele preserva os argumentos históricos, mas requer Python 3 e não duplica download, extração ou ativação.
 
 ---
 
@@ -40,11 +40,13 @@ Dê permissão de execução aos scripts antes do primeiro uso:
 chmod +x upgrade.py upgrade.sh
 ```
 
-O script Python utiliza apenas a biblioteca padrão. A implementação Bash requer
-`curl`, GNU `tar`, `flock`, `mktemp` e `sha256sum`.
+As duas entradas requerem Python 3; nenhuma dependência Python externa é
+necessária em tempo de execução.
 
 > [!IMPORTANT]
-> Como o diretório base de instalação é `/opt/antigravity_apps`, os scripts **devem ser executados com privilégios de administrador (usando `sudo`)**. Os scripts possuem verificação nativa para garantir a execução correta e gerenciam automaticamente a propriedade do atalho criado na Área de Trabalho para que ele pertença ao seu usuário comum (não ao `root`).
+> Como o diretório base de instalação é `/opt/antigravity_apps`, `update`,
+> `rollback` e `prune` exigem privilégios administrativos. As consultas
+> `current`, `list` e `changelog` podem ser executadas sem `sudo`.
 
 ### Modo Interativo
 Ao rodar qualquer um dos scripts sem argumentos com `sudo`, um menu de seleção interativo colorido será exibido no terminal:
@@ -68,30 +70,28 @@ sudo ./upgrade.sh
 10. Limpar histórico antigo, preservando ativa e anterior
 
 ### Modo Não Interativo / Automação (CLI)
-Você pode passar a opção desejada como argumento ao invocar o comando com `sudo` para ignorar o menu interativo:
+A sintaxe canônica usa subcomandos:
 
 ```bash
 # Para atualizar ambos
-sudo ./upgrade.py --both
-sudo ./upgrade.sh both
+sudo ./upgrade.py update --both
+sudo ./upgrade.sh update --both
 
 # Para atualizar apenas o Antigravity (Hub)
-sudo ./upgrade.py --hub
-sudo ./upgrade.sh hub
+sudo ./upgrade.py update --hub
 
 # Para atualizar apenas o Antigravity IDE
-sudo ./upgrade.py --ide
-sudo ./upgrade.sh ide
+sudo ./upgrade.py update --ide
 
 # Para forçar reinstalação de ambos (mesmo na mesma versão)
-sudo ./upgrade.py --reinstall
-sudo ./upgrade.py --both --force
-sudo ./upgrade.sh force
+sudo ./upgrade.py update --both --force
 
 # Para consultar as notas mais recentes sem instalar/atualizar
-sudo ./upgrade.py --changelog
-sudo ./upgrade.sh changelog
+./upgrade.py changelog
 ```
+
+As formas históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both`,
+`force` e opções numéricas) continuam aceitas pelas duas entradas.
 
 ### Gerenciamento das versões instaladas
 
@@ -99,24 +99,22 @@ Os comandos abaixo não acessam a rede:
 
 ```bash
 # Mostrar apenas as versões ativas
-sudo ./upgrade.py --current
-sudo ./upgrade.sh current
+./upgrade.py current
+./upgrade.sh current
 
 # Listar todo o histórico; use --hub ou --ide para filtrar
-sudo ./upgrade.py --list --hub
-sudo ./upgrade.sh list ide
+./upgrade.py list --hub
+./upgrade.sh list --ide
 
 # Voltar para a versão anterior registrada
-sudo ./upgrade.py --rollback --hub
-sudo ./upgrade.sh rollback hub
+sudo ./upgrade.py rollback --hub
+sudo ./upgrade.sh rollback --hub
 
 # Selecionar explicitamente uma versão
-sudo ./upgrade.py --rollback 2.5.0-5471848641724416 --hub
-sudo ./upgrade.sh rollback 2.5.0-5471848641724416 hub
+sudo ./upgrade.py rollback 2.5.0-5471848641724416 --hub
 
 # Manter pelo menos duas versões por aplicativo
-sudo ./upgrade.py --prune 2
-sudo ./upgrade.sh prune 2
+sudo ./upgrade.py prune 2
 ```
 
 `prune` sempre preserva a versão ativa e a anterior disponível para rollback;
@@ -143,7 +141,7 @@ Neste modo, o Systemd executa o script de atualização de forma recorrente (ex:
    [Service]
    Type=oneshot
    # Ajuste o caminho para o local do seu script e selecione python3 ou bash
-   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py --both
+   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py update --both
    # O instalador atual grava em /opt e exige privilégios administrativos.
    User=root
    ```
@@ -181,7 +179,7 @@ Neste modo, o script verifica se há atualizações disponíveis toda vez que o 
 
    [Service]
    Type=oneshot
-   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py --both
+   ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py update --both
    # O instalador atual grava em /opt e exige privilégios administrativos.
    User=root
 
@@ -235,11 +233,11 @@ Para executar as verificações Python em um ambiente virtual:
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
 .venv/bin/pytest
-.venv/bin/ruff check upgrade.py tests
-.venv/bin/mypy upgrade.py
+.venv/bin/ruff check upgrade.py antigravity_updater tests
+.venv/bin/mypy upgrade.py antigravity_updater
 ```
 
-O script Bash é verificado na integração contínua com `bash -n`, ShellCheck e
+O wrapper Bash é verificado na integração contínua com `bash -n`, ShellCheck e
 shfmt. O mesmo conjunto é executado automaticamente pelo workflow de qualidade.
 
 ---

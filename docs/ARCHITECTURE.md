@@ -1,26 +1,31 @@
 # Arquitetura
 
-## Estado no M1
+## Estado na versão 0.5.0 (M4)
 
-O repositório oferece duas interfaces compatíveis:
+O repositório oferece duas entradas compatíveis para uma única implementação:
 
-- `upgrade.py`: implementação principal em Python e alvo da modularização.
-- `upgrade.sh`: implementação Bash mantida para compatibilidade temporária.
+- `upgrade.py`: entrada histórica para a CLI Python canônica.
+- `upgrade.sh`: wrapper Bash que preserva os comandos antigos.
 
-Ambas descobrem URLs na página oficial, baixam o pacote para uma sessão privada,
-validam sua integridade e conteúdo, extraem em staging e atualizam um link
-simbólico em `/opt/antigravity_apps`. A ativação do link ainda não é transacional;
-esse limite será tratado no M3.
+O motor Python descobre URLs na página oficial, baixa o pacote para uma sessão
+privada, valida sua integridade e conteúdo e extrai em staging. A versão
+validada passa por health check antes e depois da troca atômica do link em
+`/opt/antigravity_apps`; se a verificação posterior falhar, o link anterior é
+restaurado automaticamente.
 
-O módulo Python pode ser importado sem verificar privilégios ou criar diretórios.
-Esses efeitos ficam restritos à execução do programa, permitindo testes locais
-das funções de descoberta e apresentação.
+O pacote `antigravity_updater` separa a análise e política da CLI (`cli.py`) do
+motor operacional (`core.py`). O módulo pode ser importado sem verificar
+privilégios ou criar diretórios. A CLI classifica os comandos antes de provocar
+efeitos: `current`, `list` e `changelog` são consultas sem root; `update`,
+`rollback` e `prune` exigem root e lock exclusivo.
 
-## Direção planejada
+## Compatibilidade da CLI
 
-A implementação Python será separada em componentes de CLI, descoberta remota,
-download, validação, armazenamento de versões e integração com o sistema. Após
-testes de paridade, `upgrade.sh` será reduzido a um wrapper da CLI canônica.
+A forma canônica usa subcomandos (`update`, `changelog`, `current`, `list`,
+`rollback` e `prune`). A camada de normalização aceita as opções históricas,
+incluindo `--both`, `--hub`, `--ide`, `--reinstall` e as opções numéricas do
+menu. Tanto `upgrade.py` quanto `upgrade.sh` chegam ao mesmo parser e ao mesmo
+motor, evitando divergência de segurança e comportamento entre linguagens.
 
 ## Pipeline de instalação do M2
 

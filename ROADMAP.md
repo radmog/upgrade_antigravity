@@ -25,8 +25,8 @@ existente até que uma migração seja documentada.
 
 ## M4 — CLI e implementação canônica (0.5.0)
 
-- [ ] CLI estruturada e consultas sem root.
-- [ ] Módulos internos coesos e Bash como wrapper de compatibilidade.
+- [x] CLI estruturada e consultas sem root.
+- [x] Módulos internos coesos e Bash como wrapper de compatibilidade.
 
 ## M5 — Integração com Linux (0.6.0)
 
