@@ -4,11 +4,13 @@ import sys
 import platform
 import urllib.request
 import urllib.error
+import urllib.parse
 import gzip
 import re
 import shutil
 import tarfile
 import inspect
+import html
 import time
 import threading
 import email.utils
@@ -28,6 +30,7 @@ CLR_WHITE = "\033[37m"
 # Diretório base de instalação
 DIRETORIO_BASE = "/opt/antigravity_apps"
 PASTA_TMP = "/tmp/antigravity_upgrade"
+URL_CHANGELOG = "https://antigravity.google/changelog"
 
 # Verificar privilégios de administrador (root)
 if os.geteuid() != 0:
@@ -37,6 +40,7 @@ if os.geteuid() != 0:
 
 # Variável para acumular o conteúdo HTML + JS raspado da web
 conteudo_total = ""
+conteudo_changelog = ""
 
 # Detecta automaticamente a arquitetura do Ubuntu do usuário
 arch_atual = platform.machine()
@@ -186,15 +190,16 @@ def menu_selecao():
     print_opcao(2, "Instalar/Atualizar Apenas Antigravity (Hub)")
     print_opcao(3, "Instalar/Atualizar Apenas Antigravity IDE")
     print_opcao(4, "Forçar Reinstalação de Ambos (Mesmo na mesma versão)")
-    print_opcao(5, "Sair")
+    print_opcao(5, "Consultar Changelog Oficial (com tradução)")
+    print_opcao(6, "Sair")
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}")
     
     while True:
         try:
-            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-5): {CLR_RESET}").strip()
-            if opcao in ("1", "2", "3", "4", "5"):
+            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-6): {CLR_RESET}").strip()
+            if opcao in ("1", "2", "3", "4", "5", "6"):
                 return opcao
-            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 5.{CLR_RESET}")
+            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 6.{CLR_RESET}")
         except (KeyboardInterrupt, EOFError):
             print(f"\n{CLR_WARNING}Operação cancelada pelo usuário.{CLR_RESET}")
             return "5"
@@ -230,6 +235,111 @@ def fetch_url(url):
             return content.decode("utf-8", errors="ignore")
     except Exception:
         return ""
+
+# Retorna o idioma preferencial do sistema (pt_BR.UTF-8 -> pt).
+def obter_idioma_sistema():
+    for variavel in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        valor = os.environ.get(variavel, "").strip()
+        if valor and valor.upper() not in ("C", "POSIX"):
+            idioma = re.split(r"[_.@-]", valor, maxsplit=1)[0].lower()
+            if re.fullmatch(r"[a-z]{2,3}", idioma):
+                return idioma
+    return "en"
+
+def limpar_html(fragmento):
+    texto = re.sub(r"<[^>]+>", "", fragmento)
+    return " ".join(html.unescape(texto).split())
+
+def obter_url_changelog(aba, traduzir=False):
+    url_oficial = f"{URL_CHANGELOG}?tab={aba}"
+    idioma = obter_idioma_sistema()
+    if traduzir and idioma != "en":
+        return (
+            "https://translate.google.com/translate?sl=en"
+            f"&tl={urllib.parse.quote(idioma)}"
+            f"&u={urllib.parse.quote(url_oficial, safe='')}"
+        )
+    return url_oficial
+
+def obter_notas_versao(aba, versao):
+    """Extrai as notas exatas de uma versão do HTML oficial do changelog."""
+    if not conteudo_changelog:
+        return None
+
+    marcador_linha = '<div class="section-row-wrapper"'
+    marcador_versao = f'href="/releases?tab={aba}&amp;version={versao}"'
+    trecho = next(
+        (parte for parte in conteudo_changelog.split(marcador_linha)
+         if marcador_versao in parte),
+        None,
+    )
+    if not trecho:
+        return None
+
+    titulo_match = re.search(r'<h3\b[^>]*>(.*?)</h3>', trecho, re.DOTALL)
+    resumo_match = re.search(
+        r'<div class="changes"[^>]*>\s*<p[^>]*>(.*?)</p>',
+        trecho,
+        re.DOTALL,
+    )
+    grupos = []
+    for detalhe in re.findall(r'<details\b[^>]*>(.*?)</details>', trecho, re.DOTALL):
+        nome_match = re.search(r'<summary[^>]*>(.*?)</summary>', detalhe, re.DOTALL)
+        if not nome_match:
+            continue
+        itens = [
+            limpar_html(item)
+            for item in re.findall(r'<li\b[^>]*>(.*?)</li>', detalhe, re.DOTALL)
+        ]
+        grupos.append((limpar_html(nome_match.group(1)), [item for item in itens if item]))
+
+    return {
+        "titulo": limpar_html(titulo_match.group(1)) if titulo_match else "",
+        "resumo": limpar_html(resumo_match.group(1)) if resumo_match else "",
+        "grupos": grupos,
+    }
+
+def obter_versao_mais_recente(aba):
+    if not conteudo_changelog:
+        return None
+    match = re.search(
+        rf'href="/releases\?tab={re.escape(aba)}&amp;version=([^"&]+)"',
+        conteudo_changelog,
+    )
+    return html.unescape(match.group(1)) if match else None
+
+def exibir_notas_versao(nome_app, aba, versao):
+    notas = obter_notas_versao(aba, versao)
+    print(f"\n  {CLR_HEADER}Notas da versão {versao} — {nome_app}{CLR_RESET}")
+    if notas:
+        if notas["titulo"]:
+            print(f"  {CLR_WHITE}{notas['titulo']}{CLR_RESET}")
+        if notas["resumo"]:
+            print(f"  {CLR_GRAY}{notas['resumo']}{CLR_RESET}")
+        for grupo, itens in notas["grupos"]:
+            print(f"  {CLR_CYAN}{grupo}:{CLR_RESET}")
+            for item in itens:
+                print(f"    {CLR_WHITE}• {item}{CLR_RESET}")
+    else:
+        print(f"  {CLR_WARNING}⚠ Não foram encontradas notas específicas para esta versão.{CLR_RESET}")
+
+    url_oficial = obter_url_changelog(aba)
+    print(f"  {CLR_BLUE}Changelog oficial: {url_oficial}{CLR_RESET}")
+    if obter_idioma_sistema() != "en":
+        print(f"  {CLR_BLUE}Versão traduzida:  {obter_url_changelog(aba, traduzir=True)}{CLR_RESET}")
+
+def consultar_changelog():
+    print(f"\n{CLR_HEADER}CHANGELOG OFICIAL — VERSÕES MAIS RECENTES{CLR_RESET}")
+    encontrados = False
+    for nome_app, aba in (("Antigravity", "hub"), ("Antigravity_IDE", "ide")):
+        versao = obter_versao_mais_recente(aba)
+        if versao:
+            exibir_notas_versao(nome_app, aba, versao)
+            encontrados = True
+        else:
+            print(f"\n  {CLR_WARNING}⚠ Não foi possível identificar a versão mais recente de {nome_app}.{CLR_RESET}")
+            print(f"  {CLR_BLUE}Changelog oficial: {obter_url_changelog(aba)}{CLR_RESET}")
+    return encontrados
 
 # Download com barra de progresso animada
 def download_com_progresso(url, dest_path, app_name):
@@ -336,7 +446,7 @@ Categories=Development;
         return False
 
 # Função interna para processar cada um dos aplicativos
-def atualizar_aplicativo(nome_app, padrao_url, forcar=False):
+def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
     print(f"\n{CLR_BLUE}⚡ Analisando: {nome_app} ({padrao_url}) {CLR_RESET}")
     print(f"  {CLR_GRAY}----------------------------------------{CLR_RESET}")
 
@@ -384,6 +494,7 @@ def atualizar_aplicativo(nome_app, padrao_url, forcar=False):
 
     print(f"  {CLR_WHITE}Versão na Web: {CLR_CYAN}{versao_web}{CLR_RESET}{CLR_GRAY}{str_data_web}{CLR_RESET}")
     print(f"  {CLR_WHITE}Versão Local:  {CLR_GRAY}{versao_local}{str_data_local}{CLR_RESET}")
+    exibir_notas_versao(nome_app, aba_changelog, versao_web)
 
     # 5. Tomada de Decisão e Atualização
     if versao_local != versao_web or forcar:
@@ -491,8 +602,10 @@ if __name__ == "__main__":
             opcao = "3"
         elif arg in ("4", "reinstall"):
             opcao = "4"
-        elif arg in ("5", "exit", "quit"):
+        elif arg in ("5", "changelog", "changes", "release-notes"):
             opcao = "5"
+        elif arg in ("6", "exit", "quit"):
+            opcao = "6"
             
     if opcao is None:
         # Exibe menu de seleção se nenhum argumento válido for fornecido
@@ -501,9 +614,20 @@ if __name__ == "__main__":
     if opcao == "4":
         opcao = "1"
         forcar_reinstalacao = True
-    elif opcao == "5":
+    elif opcao == "6":
         print(f"\n{CLR_BLUE}Saindo sem realizar alterações.{CLR_RESET}\n")
         sys.exit(0)
+
+    if opcao == "5":
+        spinner_changelog = TerminalSpinner("Buscando changelog oficial")
+        spinner_changelog.start()
+        conteudo_changelog = fetch_url(URL_CHANGELOG)
+        if not conteudo_changelog:
+            spinner_changelog.stop(success=False, final_msg="Falha ao buscar o changelog oficial")
+            print(f"{CLR_BLUE}Consulte: {obter_url_changelog('hub')}{CLR_RESET}")
+            sys.exit(1)
+        spinner_changelog.stop(success=True, final_msg="Changelog oficial carregado com sucesso!")
+        sys.exit(0 if consultar_changelog() else 1)
         
     # Inicializa busca (scraping) apenas se o usuário for atualizar algo
     spinner_busca = TerminalSpinner("Buscando versões e mapeando dependências dinâmicas")
@@ -526,18 +650,22 @@ if __name__ == "__main__":
             js_url = f"https://antigravity.google/{js.lstrip('/')}"
         conteudo_total += "\n" + fetch_url(js_url)
 
-    spinner_busca.stop(success=True, final_msg="Versões e links da web carregados com sucesso!")
+    # O changelog é independente da página de downloads. Uma falha aqui não
+    # deve impedir a instalação; exibir_notas_versao oferece o link oficial.
+    conteudo_changelog = fetch_url(URL_CHANGELOG)
+
+    spinner_busca.stop(success=True, final_msg="Versões, links e changelog carregados com sucesso!")
 
     # Executa a ação escolhida
     sucesso = True
     if opcao == "1":
-        s1 = atualizar_aplicativo("Antigravity", "antigravity-hub", forcar=forcar_reinstalacao)
-        s2 = atualizar_aplicativo("Antigravity_IDE", "stable", forcar=forcar_reinstalacao)
+        s1 = atualizar_aplicativo("Antigravity", "antigravity-hub", "hub", forcar=forcar_reinstalacao)
+        s2 = atualizar_aplicativo("Antigravity_IDE", "stable", "ide", forcar=forcar_reinstalacao)
         sucesso = s1 and s2
     elif opcao == "2":
-        sucesso = atualizar_aplicativo("Antigravity", "antigravity-hub", forcar=forcar_reinstalacao)
+        sucesso = atualizar_aplicativo("Antigravity", "antigravity-hub", "hub", forcar=forcar_reinstalacao)
     elif opcao == "3":
-        sucesso = atualizar_aplicativo("Antigravity_IDE", "stable", forcar=forcar_reinstalacao)
+        sucesso = atualizar_aplicativo("Antigravity_IDE", "stable", "ide", forcar=forcar_reinstalacao)
         
     if sucesso:
         print(f"\n{CLR_HEADER}======================================================={CLR_RESET}")

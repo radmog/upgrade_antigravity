@@ -14,6 +14,7 @@ CLR_WHITE="\033[37m"
 # Diretório base de instalação
 DIRETORIO_BASE="/opt/antigravity_apps"
 PASTA_TMP="/tmp/antigravity_upgrade"
+URL_CHANGELOG="https://antigravity.google/changelog"
 
 # Verificar privilégios de administrador (root)
 if [ "$EUID" -ne 0 ]; then
@@ -63,6 +64,123 @@ parar_spinner() {
     else
         echo -e "${CLR_FAIL}✗ $MSG${CLR_RESET}"
     fi
+}
+
+# Detecta pt_BR.UTF-8 como "pt" e cria um link traduzido quando necessário.
+obter_idioma_sistema() {
+    local VALOR="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+    VALOR="${VALOR%%.*}"
+    VALOR="${VALOR%%_*}"
+    VALOR="${VALOR%%-*}"
+    VALOR=$(printf '%s' "$VALOR" | tr '[:upper:]' '[:lower:]')
+    if [[ "$VALOR" =~ ^[a-z]{2,3}$ ]] && [ "$VALOR" != "posix" ]; then
+        printf '%s' "$VALOR"
+    else
+        printf 'en'
+    fi
+}
+
+obter_url_changelog() {
+    local ABA="$1"
+    local TRADUZIR="${2:-0}"
+    local IDIOMA
+    IDIOMA=$(obter_idioma_sistema)
+    if [ "$TRADUZIR" -eq 1 ] && [ "$IDIOMA" != "en" ]; then
+        printf 'https://translate.google.com/translate?sl=en&tl=%s&u=https%%3A%%2F%%2Fantigravity.google%%2Fchangelog%%3Ftab%%3D%s' "$IDIOMA" "$ABA"
+    else
+        printf '%s?tab=%s' "$URL_CHANGELOG" "$ABA"
+    fi
+}
+
+exibir_notas_versao() {
+    local NOME_APP="$1"
+    local ABA="$2"
+    local VERSAO="$3"
+    local MARCADOR="href=\"/releases?tab=${ABA}&amp;version=${VERSAO}\""
+    local NOTAS=""
+
+    if [ -s "$PAGINA_CHANGELOG" ]; then
+        # Cada registro começa em uma versão. Apenas o registro cujo link
+        # contém simultaneamente a aba e a versão desejadas é processado.
+        NOTAS=$(awk -v RS='<div class="section-row-wrapper"' -v marcador="$MARCADOR" '
+            index($0, marcador) { print; exit }
+        ' "$PAGINA_CHANGELOG" | sed \
+            -e 's#<h3#\n<h3#g' -e 's#</h3>#</h3>\n#g' \
+            -e 's#<div class="changes"#\n<div class="changes"#g' \
+            -e 's#<p#\n<p#g' -e 's#</p>#</p>\n#g' \
+            -e 's#<summary#\n<summary#g' -e 's#</summary>#</summary>\n#g' \
+            -e 's#<li#\n<li#g' -e 's#</li>#</li>\n#g' | awk '
+            function limpar(s) {
+                gsub(/<[^>]*>/, "", s)
+                gsub(/&amp;/, "\\&", s)
+                gsub(/&quot;/, "\"", s)
+                gsub(/&#39;|&#x27;/, "\047", s)
+                gsub(/&lt;/, "<", s)
+                gsub(/&gt;/, ">", s)
+                gsub(/&nbsp;/, " ", s)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+                return s
+            }
+            /<h3[ >]/ { texto=limpar($0); if (texto != "") print "T\t" texto }
+            /<div class="changes"/ { em_resumo=1; next }
+            em_resumo && /<p[ >]/ { texto=limpar($0); if (texto != "") print "R\t" texto; em_resumo=0 }
+            /<summary[ >]/ { texto=limpar($0); if (texto != "") print "G\t" texto }
+            /<li[ >]/ { texto=limpar($0); if (texto != "") print "I\t" texto }
+        ')
+    fi
+
+    echo -e "\n  ${CLR_HEADER}Notas da versão $VERSAO — $NOME_APP${CLR_RESET}"
+    if [ -n "$NOTAS" ]; then
+        while IFS=$'\t' read -r TIPO TEXTO; do
+            case "$TIPO" in
+                T) echo -e "  ${CLR_WHITE}${TEXTO}${CLR_RESET}" ;;
+                R) echo -e "  ${CLR_GRAY}${TEXTO}${CLR_RESET}" ;;
+                G) echo -e "  ${CLR_CYAN}${TEXTO}:${CLR_RESET}" ;;
+                I) echo -e "    ${CLR_WHITE}• ${TEXTO}${CLR_RESET}" ;;
+            esac
+        done <<< "$NOTAS"
+    else
+        echo -e "  ${CLR_WARNING}⚠ Não foram encontradas notas específicas para esta versão.${CLR_RESET}"
+    fi
+
+    echo -e "  ${CLR_BLUE}Changelog oficial: $(obter_url_changelog "$ABA")${CLR_RESET}"
+    if [ "$(obter_idioma_sistema)" != "en" ]; then
+        echo -e "  ${CLR_BLUE}Versão traduzida:  $(obter_url_changelog "$ABA" 1)${CLR_RESET}"
+    fi
+}
+
+obter_versao_mais_recente() {
+    local ABA="$1"
+    [ -s "$PAGINA_CHANGELOG" ] || return 1
+    grep -oE "href=\"/releases\?tab=${ABA}&amp;version=[^\"]+\"" "$PAGINA_CHANGELOG" |
+        head -n 1 |
+        sed -E 's/.*version=([^"&]+).*/\1/'
+}
+
+consultar_changelog() {
+    local ENCONTRADOS=0
+    local VERSAO
+
+    echo -e "\n${CLR_HEADER}CHANGELOG OFICIAL — VERSÕES MAIS RECENTES${CLR_RESET}"
+    VERSAO=$(obter_versao_mais_recente "hub")
+    if [ -n "$VERSAO" ]; then
+        exibir_notas_versao "Antigravity" "hub" "$VERSAO"
+        ENCONTRADOS=1
+    else
+        echo -e "\n  ${CLR_WARNING}⚠ Não foi possível identificar a versão mais recente de Antigravity.${CLR_RESET}"
+        echo -e "  ${CLR_BLUE}Changelog oficial: $(obter_url_changelog "hub")${CLR_RESET}"
+    fi
+
+    VERSAO=$(obter_versao_mais_recente "ide")
+    if [ -n "$VERSAO" ]; then
+        exibir_notas_versao "Antigravity_IDE" "ide" "$VERSAO"
+        ENCONTRADOS=1
+    else
+        echo -e "\n  ${CLR_WARNING}⚠ Não foi possível identificar a versão mais recente de Antigravity_IDE.${CLR_RESET}"
+        echo -e "  ${CLR_BLUE}Changelog oficial: $(obter_url_changelog "ide")${CLR_RESET}"
+    fi
+
+    [ "$ENCONTRADOS" -eq 1 ]
 }
 
 # Exibe diagnósticos de hardware e do sistema
@@ -166,18 +284,19 @@ menu_selecao() {
     print_opcao 2 "Instalar/Atualizar Apenas Antigravity (Hub)"
     print_opcao 3 "Instalar/Atualizar Apenas Antigravity IDE"
     print_opcao 4 "Forçar Reinstalação de Ambos (Mesmo na mesma versão)"
-    print_opcao 5 "Sair"
+    print_opcao 5 "Consultar Changelog Oficial (com tradução)"
+    print_opcao 6 "Sair"
     echo -e "${CLR_HEADER}╚${LINHA_BORDAS}╝${CLR_RESET}"
 
     while true; do
-        read -p "Digite sua escolha (1-5): " ESCOLHA
+        read -p "Digite sua escolha (1-6): " ESCOLHA
         case "$ESCOLHA" in
-            1|2|3|4|5)
+            1|2|3|4|5|6)
                 OPCAO_SELECIONADA="$ESCOLHA"
                 return
                 ;;
             *)
-                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 5.${CLR_RESET}"
+                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 6.${CLR_RESET}"
                 ;;
         esac
     done
@@ -255,7 +374,8 @@ EOF
 atualizar_aplicativo() {
     local NOME_APP=$1
     local PADRAO_URL=$2
-    local FORCAR=${3:-0}
+    local ABA_CHANGELOG=$3
+    local FORCAR=${4:-0}
 
     echo -e "\n${CLR_BLUE}⚡ Analisando: $NOME_APP ($PADRAO_URL) ${CLR_RESET}"
     echo -e "  ${CLR_GRAY}----------------------------------------${CLR_RESET}"
@@ -302,6 +422,7 @@ atualizar_aplicativo() {
 
     echo -e "  ${CLR_WHITE}Versão na Web: ${CLR_CYAN}$VERSAO_WEB${CLR_RESET}${CLR_GRAY}$STR_DATA_WEB${CLR_RESET}"
     echo -e "  ${CLR_WHITE}Versão Local:  ${CLR_GRAY}$VERSAO_LOCAL$STR_DATA_LOCAL${CLR_RESET}"
+    exibir_notas_versao "$NOME_APP" "$ABA_CHANGELOG" "$VERSAO_WEB"
 
     # 4. Tomada de Decisão e Atualização
     if [ "$VERSAO_LOCAL" != "$VERSAO_WEB" ] || [ "$FORCAR" -eq 1 ]; then
@@ -386,8 +507,11 @@ for arg in "$@"; do
             4|reinstall)
                 OPCAO_SELECIONADA="4"
                 ;;
-            5|exit|quit)
+            5|changelog|changes|release-notes)
                 OPCAO_SELECIONADA="5"
+                ;;
+            6|exit|quit)
+                OPCAO_SELECIONADA="6"
                 ;;
         esac
     fi
@@ -401,9 +525,25 @@ fi
 if [ "$OPCAO_SELECIONADA" = "4" ]; then
     OPCAO_SELECIONADA="1"
     FORCAR_REINSTALACAO=1
-elif [ "$OPCAO_SELECIONADA" = "5" ]; then
+elif [ "$OPCAO_SELECIONADA" = "6" ]; then
     echo -e "\n${CLR_BLUE}Saindo sem realizar alterações.${CLR_RESET}\n"
     exit 0
+fi
+
+if [ "$OPCAO_SELECIONADA" = "5" ]; then
+    iniciar_spinner "Buscando changelog oficial"
+    PAGINA_CHANGELOG="$PASTA_TMP/changelog.html"
+    curl -sL --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
+    if [ ! -s "$PAGINA_CHANGELOG" ]; then
+        parar_spinner 1 "Falha ao buscar o changelog oficial"
+        echo -e "${CLR_BLUE}Consulte: $(obter_url_changelog "hub")${CLR_RESET}"
+        exit 1
+    fi
+    parar_spinner 0 "Changelog oficial carregado com sucesso!"
+    consultar_changelog
+    STATUS_CHANGELOG=$?
+    rm -f "$PAGINA_CHANGELOG"
+    exit "$STATUS_CHANGELOG"
 fi
 
 # Inicializa busca (scraping)
@@ -411,6 +551,7 @@ iniciar_spinner "Buscando versões e mapeando dependências dinâmicas"
 
 PAGINA_RAW="$PASTA_TMP/download_raw.html"
 PAGINA_HTML="$PASTA_TMP/download.html"
+PAGINA_CHANGELOG="$PASTA_TMP/changelog.html"
 curl -sL --compressed "https://antigravity.google/download" -o "$PAGINA_RAW"
 
 if [ ! -s "$PAGINA_RAW" ]; then
@@ -430,14 +571,18 @@ for js in $JS_FILES; do
     curl -sL --compressed "$js_url" >> "$PAGINA_HTML" 2>/dev/null
 done
 
-parar_spinner 0 "Versões e links da web carregados com sucesso!"
+# A ausência do changelog não bloqueia a instalação; a função de exibição
+# mantém o link oficial como alternativa.
+curl -sL --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
+
+parar_spinner 0 "Versões, links e changelog carregados com sucesso!"
 
 # Processa a opção escolhida
 SUCESSO=0
 if [ "$OPCAO_SELECIONADA" = "1" ]; then
-    atualizar_aplicativo "Antigravity" "antigravity-hub" "$FORCAR_REINSTALACAO"
+    atualizar_aplicativo "Antigravity" "antigravity-hub" "hub" "$FORCAR_REINSTALACAO"
     s1=$?
-    atualizar_aplicativo "Antigravity_IDE" "stable" "$FORCAR_REINSTALACAO"
+    atualizar_aplicativo "Antigravity_IDE" "stable" "ide" "$FORCAR_REINSTALACAO"
     s2=$?
     if [ $s1 -eq 0 ] && [ $s2 -eq 0 ]; then
         SUCESSO=0
@@ -445,15 +590,15 @@ if [ "$OPCAO_SELECIONADA" = "1" ]; then
         SUCESSO=1
     fi
 elif [ "$OPCAO_SELECIONADA" = "2" ]; then
-    atualizar_aplicativo "Antigravity" "antigravity-hub" "$FORCAR_REINSTALACAO"
+    atualizar_aplicativo "Antigravity" "antigravity-hub" "hub" "$FORCAR_REINSTALACAO"
     SUCESSO=$?
 elif [ "$OPCAO_SELECIONADA" = "3" ]; then
-    atualizar_aplicativo "Antigravity_IDE" "stable" "$FORCAR_REINSTALACAO"
+    atualizar_aplicativo "Antigravity_IDE" "stable" "ide" "$FORCAR_REINSTALACAO"
     SUCESSO=$?
 fi
 
 # Limpeza dos arquivos temporários
-rm -f "$PAGINA_RAW" "$PAGINA_HTML"
+rm -f "$PAGINA_RAW" "$PAGINA_HTML" "$PAGINA_CHANGELOG"
 
 if [ $SUCESSO -eq 0 ]; then
     echo -e "\n${CLR_HEADER}=======================================================${CLR_RESET}"

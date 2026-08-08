@@ -8,6 +8,8 @@ Este repositório contém scripts de automação projetados para gerenciar, inst
 - **Diagnóstico do Sistema**: Coleta e exibe especificações de hardware (sistema operacional, processador, threads da CPU, memória RAM em uso/total e espaço em disco disponível) em uma tabela visual elegante no terminal.
 - **Web Scraping Dinâmico**: Realiza buscas automáticas na página oficial de downloads (`https://antigravity.google/download`) e rastreia scripts JavaScript referenciados para identificar as URLs e versões estáveis mais recentes.
 - **Exibição de Datas e Horários**: Exibe a data/hora do lançamento da versão no servidor remoto (obtida via cabeçalho HTTP `Last-Modified`) e a data/hora de instalação da versão local presente na máquina.
+- **Notas de Versão**: Busca o changelog oficial e exibe no terminal o resumo, as melhorias, as correções e os patches correspondentes exatamente à versão disponível de cada aplicativo.
+- **Acesso Traduzido ao Changelog**: Detecta o idioma configurado no sistema e, quando ele não é inglês, disponibiliza um link do Google Tradutor para a aba oficial do produto no idioma local. Uma falha ao obter o changelog não bloqueia a instalação.
 - **Forçar Reinstalação**: Permite forçar o re-download e a reinstalação dos aplicativos mesmo quando as versões local e remota coincidirem.
 - **Gerenciamento de Versões**: Mantém um histórico de versões instaladas dentro de subpastas específicas (ex: `Antigravity_VERSOES/Antigravity-X.Y.Z`).
 - **Links Simbólicos Dinâmicos**: Atualiza um link simbólico que aponta sempre para a versão ativa/mais recente, garantindo que atalhos e referências ao executável nunca fiquem obsoletos.
@@ -18,10 +20,10 @@ Este repositório contém scripts de automação projetados para gerenciar, inst
 
 ## 🛠️ Arquivos do Repositório
 
-### 1. [upgrade.py](file:///home/rguedes/Antigravity/Antigravity_Upgrade/upgrade.py)
+### 1. [upgrade.py](file:///opt/antigravity_apps/upgrade.py)
 Script escrito em Python 3 utilizando apenas bibliotecas nativas (`urllib`, `tarfile`, `platform`, `threading`, etc.). Ideal para execução em ambientes que requerem multithreading para renderização do spinner animado ou processamento mais robusto.
 
-### 2. [upgrade.sh](file:///home/rguedes/Antigravity/Antigravity_Upgrade/upgrade.sh)
+### 2. [upgrade.sh](file:///opt/antigravity_apps/upgrade.sh)
 Script escrito em Bash Shell. Ideal para automações em servidores, containers ou ambientes mínimos onde o Python não está disponível. Utiliza comandos utilitários como `curl` para downloads e processamento de texto tradicional para raspagem de dados.
 
 ---
@@ -51,7 +53,8 @@ sudo ./upgrade.sh
 2. Instalar/Atualizar Apenas Antigravity (Hub)
 3. Instalar/Atualizar Apenas Antigravity IDE
 4. Forçar Reinstalação de Ambos (Mesmo na mesma versão)
-5. Sair
+5. Consultar Changelog Oficial (com tradução)
+6. Sair
 
 ### Modo Não Interativo / Automação (CLI)
 Você pode passar a opção desejada como argumento ao invocar o comando com `sudo` para ignorar o menu interativo:
@@ -73,6 +76,10 @@ sudo ./upgrade.sh ide
 sudo ./upgrade.py --reinstall
 sudo ./upgrade.py --both --force
 sudo ./upgrade.sh force
+
+# Para consultar as notas mais recentes sem instalar/atualizar
+sudo ./upgrade.py --changelog
+sudo ./upgrade.sh changelog
 ```
 
 ---
@@ -176,4 +183,4 @@ Quando os scripts são executados, eles geram uma estrutura de arquivos local pa
 
 ## 📄 Licença
 
-Este projeto está licenciado sob a licença MIT. 
+Este projeto está licenciado sob a licença MIT.
