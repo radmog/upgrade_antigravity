@@ -12,7 +12,7 @@ def test_versao_estavel_sincronizada():
     project_version = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE)
 
     assert project_version is not None
-    assert __version__ == project_version.group(1) == "1.0.0"
+    assert __version__ == project_version.group(1) == "1.0.1"
 
 
 def test_ci_cobre_matriz_python_suportada():

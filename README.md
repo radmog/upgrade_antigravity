@@ -2,7 +2,7 @@
 
 Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity** (Hub) e o **Antigravity IDE** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
 
-A versão `1.0.0` é a primeira release estável. Consulte a
+A versão `1.0.1` é a release estável atual; `1.0.0` foi a primeira release estável. Consulte a
 [matriz de compatibilidade](docs/COMPATIBILITY.md), o
 [guia operacional](docs/OPERATIONS.md), o [processo de release](docs/RELEASING.md)
 e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.

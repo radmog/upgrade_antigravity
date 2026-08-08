@@ -2,6 +2,11 @@
 
 Todas as mudanças relevantes do projeto são registradas neste arquivo.
 
+## 1.0.1
+
+- Restaura o diagnóstico de sistema e hardware antes do menu interativo.
+- Mantém a saída de automações sem o diagnóstico adicional.
+
 ## 1.0.0
 
 - Consolidação da interface interativa, com **Sair** como última opção.
