@@ -2,6 +2,11 @@
 
 Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity** (Hub) e o **Antigravity IDE** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
 
+A versão `1.0.0` é a primeira release estável. Consulte a
+[matriz de compatibilidade](docs/COMPATIBILITY.md), o
+[guia operacional](docs/OPERATIONS.md), o [processo de release](docs/RELEASING.md)
+e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.
+
 ## ⚡ Funcionalidades Principais
 
 - **Detecção Automática de Arquitetura**: Suporte para arquiteturas de 64 bits (`linux-x64`) e ARM (`linux-arm`).
@@ -56,26 +61,38 @@ necessária em tempo de execução.
 > diretórios XDG do usuário e não exige `sudo`. `current`, `list`, `changelog` e
 > `systemd status` são consultas e não elevam privilégios.
 
-### Modo Interativo
-Ao rodar qualquer um dos scripts sem argumentos com `sudo`, um menu de seleção interativo colorido será exibido no terminal:
+### Modo interativo
+
+Sem argumentos, o menu usa o escopo de sistema. Use somente `--user` para abrir
+o mesmo menu no escopo do usuário:
 
 ```bash
 sudo ./upgrade.py
-# ou
-sudo ./upgrade.sh
+./upgrade.py --user
 ```
 
-**Opções do Menu:**
+**Opções do menu:**
+
 1. Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)
 2. Instalar/Atualizar Apenas Antigravity (Hub)
 3. Instalar/Atualizar Apenas Antigravity IDE
-4. Forçar Reinstalação de Ambos (Mesmo na mesma versão)
+4. Forçar Reinstalação de Ambos
 5. Consultar Changelog Oficial (com tradução)
-6. Sair
+6. Verificar atualizações sem instalar
 7. Mostrar versões ativas
 8. Listar histórico de versões
-9. Fazer rollback de ambos para a versão anterior
-10. Limpar histórico antigo, preservando ativa e anterior
+9. Rollback de ambos para a versão anterior
+10. Limpar histórico antigo
+11. Mostrar configuração efetiva
+12. Mostrar estado do cache
+13. Mostrar logs recentes
+14. Instalar/reconciliar launchers
+15. Mostrar estado do timer systemd
+16. Desinstalar ambos
+17. **Sair**
+
+`Sair` é sempre a última opção. A desinstalação pelo menu exige a confirmação
+literal `REMOVER` antes de qualquer alteração.
 
 ### Modo Não Interativo / Automação (CLI)
 A sintaxe canônica usa subcomandos:
@@ -104,8 +121,10 @@ sudo ./upgrade.py update --both --force
 ./upgrade.py check --both --user
 ```
 
-As formas históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both`,
-`force` e opções numéricas) continuam aceitas pelas duas entradas.
+As formas históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both` e
+`force`) continuam aceitas pelas duas entradas. As opções numéricas seguem o
+menu atual; por isso, `6` agora verifica atualizações e `17` encerra. Os aliases
+textuais `exit` e `quit` continuam encerrando diretamente.
 
 ### Gerenciamento das versões instaladas
 
@@ -273,7 +292,8 @@ usuário ficam em `$XDG_DATA_HOME/applications`.
 
 O plano de evolução está documentado em [ROADMAP.md](ROADMAP.md), com os limites
 de segurança atuais em [SECURITY.md](SECURITY.md) e a direção técnica em
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Procedimentos de produção estão em
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 Para executar as verificações Python em um ambiente virtual:
 

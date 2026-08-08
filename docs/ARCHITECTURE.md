@@ -1,6 +1,6 @@
 # Arquitetura
 
-## Estado na versão 0.7.0 (M6)
+## Estado na versão 1.0.0 (M7)
 
 O repositório oferece duas entradas compatíveis para uma única implementação:
 
@@ -74,6 +74,19 @@ Cada comando registra início e término em JSON Lines. Atualizações e verific
 também registram o resultado e podem emitir notificação desktop. Os arquivos de
 log giram ao atingir 1 MiB, mantendo três backups; falhas de log ou notificação
 não impedem a operação principal.
+
+## Consolidação do M7
+
+O menu interativo é derivado de uma única tabela ordenada de opções. A saída é
+exclusivamente a última entrada, e cancelamentos por teclado convergem para essa
+mesma ação. O escopo pode ser escolhido antes do menu com `--user` ou
+`--system`; todas as ações geradas preservam essa escolha. A desinstalação
+interativa exige confirmação antes de adquirir lock.
+
+A compatibilidade Python passa a ser exercitada em matriz no CI, enquanto lint,
+tipagem, verificações do wrapper e construção do wheel permanecem em um job de
+qualidade separado. A release estável inclui documentação específica de
+compatibilidade e operação.
 
 ## Pipeline de instalação do M2
 

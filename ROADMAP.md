@@ -38,4 +38,4 @@ existente até que uma migração seja documentada.
 
 ## M7 — Consolidação (1.0.0)
 
-- [ ] Matriz de compatibilidade, documentação operacional e release estável.
+- [x] Matriz de compatibilidade, documentação operacional e release estável.

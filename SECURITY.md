@@ -58,6 +58,11 @@ somente quando uma nova busca falha. Logs JSONL são privados, rotativos e
 recusam symlinks. Notificações usam `notify-send` com vetor de argumentos, sem
 shell, têm timeout e nunca alteram o código de saída da operação principal.
 
+Na versão 1.0.0, a desinstalação escolhida pelo menu exige a confirmação literal
+`REMOVER` antes da verificação de privilégios, aquisição do lock ou remoção de
+arquivos. A opção de saída fica isolada na última posição e cancelamentos do
+menu são tratados como saída sem alterações.
+
 Ainda não existe uma assinatura criptográfica independente: quando o servidor
 não oferece checksum, o hash calculado serve para auditoria e detecção posterior,
 mas não autentica a origem.

@@ -4,10 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antigravity-updater"
-version = "0.7.0"
+version = "1.0.0"
 description = "Instalador e atualizador do Antigravity para Linux"
+readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
+authors = [{ name = "Ricardo Augusto de Morais Guedes" }]
+keywords = ["antigravity", "updater", "linux", "systemd"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Installation/Setup",
+]
+
+[project.urls]
+Homepage = "https://github.com/radmog/upgrade_antigravity"
+Repository = "https://github.com/radmog/upgrade_antigravity.git"
+Issues = "https://github.com/radmog/upgrade_antigravity/issues"
 
 [project.scripts]
 antigravity-upgrade = "antigravity_updater.cli:main"

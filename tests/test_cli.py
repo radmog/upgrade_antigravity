@@ -49,6 +49,7 @@ def test_scripts_possuem_sintaxe_valida():
         (["list", "ide"], "list", "ide"),
         (["--both", "--force"], "update", "both"),
         (["rollback", "1.2.3", "hub"], "rollback", "hub"),
+        (["6"], "check", "both"),
         (["10"], "prune", "both"),
     ],
 )

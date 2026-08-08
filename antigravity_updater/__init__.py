@@ -1,3 +1,3 @@
 """Implementação canônica do Antigravity Updater."""
 
-__version__ = "0.7.0"
+__version__ = "1.0.0"

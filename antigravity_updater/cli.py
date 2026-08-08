@@ -151,14 +151,24 @@ def normalize_legacy_args(arguments: Sequence[str]) -> List[str]:
         "3": ["update", "--ide"],
         "4": ["update", "--both", "--force"],
         "5": ["changelog"],
-        "6": ["exit"],
+        "6": ["check", "--both"],
         "7": ["current", "--both"],
         "8": ["list", "--both"],
         "9": ["rollback", "--both"],
         "10": ["prune", "2", "--both"],
+        "11": ["config", "show"],
+        "12": ["cache", "status"],
+        "13": ["logs"],
+        "14": ["launcher", "install", "--both"],
+        "15": ["systemd", "status"],
+        "16": ["uninstall", "--both"],
+        "17": ["exit"],
     }
     if first in numeric:
-        return numeric[first]
+        result = numeric[first]
+        if result[0] != "exit":
+            result += [item for item, normalized in zip(args[1:], cleaned[1:]) if normalized in ("user", "system")]
+        return result
 
     if first in ("user", "system") and len(args) > 1:
         normalized_args = normalize_legacy_args(args[1:])
@@ -192,8 +202,10 @@ def normalize_legacy_args(arguments: Sequence[str]) -> List[str]:
 
 def parse_args(arguments: Optional[Sequence[str]] = None) -> argparse.Namespace:
     raw = sys.argv[1:] if arguments is None else arguments
+    if list(raw) in (["--user"], ["--system"]):
+        return argparse.Namespace(command=None, scope=_clean(raw[0]))
     normalized = normalize_legacy_args(raw)
-    if normalized == ["exit"]:
+    if normalized and normalized[0] == "exit":
         return argparse.Namespace(command="exit", target="both")
     return build_parser().parse_args(normalized)
 
@@ -500,19 +512,32 @@ def _show_logs(namespace: argparse.Namespace, paths: ScopePaths) -> int:
         return 1
 
 
-def _interactive_request() -> argparse.Namespace:
-    choice = core.menu_selecao()
+def _interactive_request(scope="system") -> argparse.Namespace:
+    choice = core.menu_selecao(scope)
     mapping = {
-        "1": argparse.Namespace(command="update", target="both", force=False),
-        "2": argparse.Namespace(command="update", target="hub", force=False),
-        "3": argparse.Namespace(command="update", target="ide", force=False),
-        "4": argparse.Namespace(command="update", target="both", force=True),
-        "5": argparse.Namespace(command="changelog", target="both"),
-        "6": argparse.Namespace(command="exit", target="both"),
-        "7": argparse.Namespace(command="current", target="both"),
-        "8": argparse.Namespace(command="list", target="both"),
-        "9": argparse.Namespace(command="rollback", target="both", version=None),
-        "10": argparse.Namespace(command="prune", target="both", keep=2),
+        "1": argparse.Namespace(command="update", target="both", force=False, scope=scope),
+        "2": argparse.Namespace(command="update", target="hub", force=False, scope=scope),
+        "3": argparse.Namespace(command="update", target="ide", force=False, scope=scope),
+        "4": argparse.Namespace(command="update", target="both", force=True, scope=scope),
+        "5": argparse.Namespace(command="changelog", target="both", scope=scope),
+        "6": argparse.Namespace(command="check", target="both", scope=scope),
+        "7": argparse.Namespace(command="current", target="both", scope=scope),
+        "8": argparse.Namespace(command="list", target="both", scope=scope),
+        "9": argparse.Namespace(command="rollback", target="both", version=None, scope=scope),
+        "10": argparse.Namespace(command="prune", target="both", keep=2, scope=scope),
+        "11": argparse.Namespace(command="config", action="show", key=None, value=None, scope=scope),
+        "12": argparse.Namespace(command="cache", action="status", scope=scope),
+        "13": argparse.Namespace(command="logs", tail=20, scope=scope),
+        "14": argparse.Namespace(command="launcher", action="install", target="both", scope=scope),
+        "15": argparse.Namespace(command="systemd", action="status", calendar="daily", scope=scope),
+        "16": argparse.Namespace(
+            command="uninstall",
+            target="both",
+            keep_systemd=False,
+            confirm=True,
+            scope=scope,
+        ),
+        "17": argparse.Namespace(command="exit", target="both", scope=scope),
     }
     return mapping[choice]
 
@@ -549,10 +574,15 @@ def _run_systemd(namespace: argparse.Namespace, paths: ScopePaths) -> int:
 
 def run(namespace: argparse.Namespace) -> int:
     if namespace.command is None:
-        namespace = _interactive_request()
+        namespace = _interactive_request(getattr(namespace, "scope", "system"))
     if namespace.command == "exit":
         print(f"\n{core.CLR_BLUE}Saindo sem realizar alterações.{core.CLR_RESET}\n")
         return 0
+    if namespace.command == "uninstall" and getattr(namespace, "confirm", False):
+        confirmation = input("Digite REMOVER para confirmar a desinstalação de ambos: ").strip()
+        if confirmation != "REMOVER":
+            print("Desinstalação cancelada.")
+            return 0
     paths = resolve_scope(getattr(namespace, "scope", "system"))
     core.configurar_caminhos(paths.base_dir, paths.lock_file, paths.launcher_dir)
     if namespace.command == "config":

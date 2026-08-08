@@ -9,6 +9,27 @@ permissions:
 
 jobs:
   test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Syntax and tests
+        run: |
+          python -m compileall -q upgrade.py antigravity_updater tests
+          pytest
+
+  quality:
+    name: Quality and package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,5 +51,5 @@ jobs:
           bash -n upgrade.sh
           shellcheck -S error upgrade.sh
           shfmt -d -i 4 -ci upgrade.sh
-      - name: Tests
-        run: pytest
+      - name: Build wheel
+        run: python -m pip wheel --no-deps --wheel-dir dist .

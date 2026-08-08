@@ -254,11 +254,33 @@ def exibir_diagnosticos():
     
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}\n")
 
+MENU_OPCOES = (
+    (1, "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)"),
+    (2, "Instalar/Atualizar Apenas Antigravity (Hub)"),
+    (3, "Instalar/Atualizar Apenas Antigravity IDE"),
+    (4, "Forçar Reinstalação de Ambos (Mesma versão)"),
+    (5, "Consultar Changelog Oficial (com tradução)"),
+    (6, "Verificar Atualizações sem Instalar"),
+    (7, "Mostrar Versões Ativas"),
+    (8, "Listar Histórico de Versões"),
+    (9, "Rollback de Ambos para a Versão Anterior"),
+    (10, "Limpar Histórico Antigo (manter 2)"),
+    (11, "Mostrar Configuração Efetiva"),
+    (12, "Mostrar Estado do Cache"),
+    (13, "Mostrar Logs Recentes"),
+    (14, "Instalar/Reconciliar Launchers"),
+    (15, "Mostrar Estado do Timer systemd"),
+    (16, "Desinstalar Ambos"),
+    (17, "Sair"),
+)
+
+
 # Menu para seleção de instalação/atualização
-def menu_selecao():
+def menu_selecao(escopo="system"):
     largura_total = 78
     print(f"{CLR_HEADER}╔{'═' * largura_total}╗{CLR_RESET}")
-    titulo = "MENU DE OPÇÕES DE ATUALIZAÇÃO"
+    nome_escopo = "USUÁRIO" if escopo == "user" else "SISTEMA"
+    titulo = f"MENU ANTIGRAVITY — ESCOPO: {nome_escopo}"
     espaco_titulo = (largura_total - len(titulo)) // 2
     rem_titulo = largura_total - len(titulo) - espaco_titulo
     print(f"{CLR_HEADER}║{' ' * espaco_titulo}{titulo}{' ' * rem_titulo}║{CLR_RESET}")
@@ -268,27 +290,19 @@ def menu_selecao():
         espacos = largura_total - 5 - len(str(num)) - len(desc)
         print(f"{CLR_HEADER}║{CLR_RESET}  {CLR_CYAN}[{num}]{CLR_WHITE} {desc}{CLR_RESET}{' ' * espacos}{CLR_HEADER}║{CLR_RESET}")
         
-    print_opcao(1, "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)")
-    print_opcao(2, "Instalar/Atualizar Apenas Antigravity (Hub)")
-    print_opcao(3, "Instalar/Atualizar Apenas Antigravity IDE")
-    print_opcao(4, "Forçar Reinstalação de Ambos (Mesmo na mesma versão)")
-    print_opcao(5, "Consultar Changelog Oficial (com tradução)")
-    print_opcao(6, "Sair")
-    print_opcao(7, "Mostrar Versões Ativas")
-    print_opcao(8, "Listar Histórico de Versões")
-    print_opcao(9, "Rollback de Ambos para a Versão Anterior")
-    print_opcao(10, "Limpar Histórico Antigo (Manter 2)")
+    for numero, descricao in MENU_OPCOES:
+        print_opcao(numero, descricao)
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}")
     
     while True:
         try:
-            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-10): {CLR_RESET}").strip()
-            if opcao in tuple(str(numero) for numero in range(1, 11)):
+            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-{len(MENU_OPCOES)}): {CLR_RESET}").strip()
+            if opcao in tuple(str(numero) for numero, _descricao in MENU_OPCOES):
                 return opcao
-            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 10.{CLR_RESET}")
+            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a {len(MENU_OPCOES)}.{CLR_RESET}")
         except (KeyboardInterrupt, EOFError):
             print(f"\n{CLR_WARNING}Operação cancelada pelo usuário.{CLR_RESET}")
-            return "6"
+            return str(MENU_OPCOES[-1][0])
 
 # Função para obter a data de modificação no servidor remoto
 def obter_data_servidor(url):
