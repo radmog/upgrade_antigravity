@@ -2,12 +2,20 @@
 import os
 import sys
 import platform
+import atexit
+import fcntl
+import hashlib
+import json
+import posixpath
+import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
 import gzip
 import re
 import shutil
+import stat
+import subprocess
 import tarfile
 import inspect
 import html
@@ -29,32 +37,96 @@ CLR_WHITE = "\033[37m"
 
 # Diretório base de instalação
 DIRETORIO_BASE = "/opt/antigravity_apps"
-PASTA_TMP = "/tmp/antigravity_upgrade"
+PASTA_TMP = None
+ARQUIVO_LOCK = "/run/lock/antigravity-updater.lock"
 URL_CHANGELOG = "https://antigravity.google/changelog"
+HTTP_TIMEOUT = 30
+HTTP_RETRIES = 3
+HEALTHCHECK_TIMEOUT = 15
+MAX_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 12 * 1024 * 1024 * 1024
+MAX_ARCHIVE_MEMBERS = 200_000
+LOCK_HANDLE = None
 
-# Verificar privilégios de administrador (root)
-if os.geteuid() != 0:
+def verificar_privilegios():
+    """Interrompe a execução quando o instalador não possui privilégios."""
+    if os.geteuid() == 0:
+        return
     print(f"{CLR_FAIL}Erro: Este script precisa ser executado com privilégios de administrador (root/sudo).{CLR_RESET}")
     print(f"{CLR_WARNING}Por favor, execute novamente usando: sudo {sys.executable or 'python3'} {os.path.abspath(sys.argv[0])}{CLR_RESET}\n")
-    sys.exit(1)
+    raise SystemExit(1)
 
 # Variável para acumular o conteúdo HTML + JS raspado da web
 conteudo_total = ""
 conteudo_changelog = ""
 
 # Detecta automaticamente a arquitetura do Ubuntu do usuário
-arch_atual = platform.machine()
-if arch_atual == "x86_64":
-    ARCH_ALVO = "linux-x64"
-elif arch_atual in ("aarch64", "arm64"):
-    ARCH_ALVO = "linux-arm"
-else:
-    print(f"{CLR_FAIL}Arquitetura não suportada: {arch_atual}{CLR_RESET}")
-    sys.exit(1)
+def detectar_arquitetura(arquitetura):
+    """Converte a arquitetura do sistema no identificador usado nos downloads."""
+    if arquitetura == "x86_64":
+        return "linux-x64"
+    if arquitetura in ("aarch64", "arm64"):
+        return "linux-arm"
+    raise ValueError(f"Arquitetura não suportada: {arquitetura}")
 
-# Criar os diretórios necessários
-os.makedirs(DIRETORIO_BASE, exist_ok=True)
-os.makedirs(PASTA_TMP, exist_ok=True)
+
+ARCH_ALVO = detectar_arquitetura(platform.machine())
+
+
+def preparar_diretorios(diretorio_temporario=None):
+    """Cria uma sessão temporária privada para a execução atual."""
+    global PASTA_TMP
+    os.makedirs(DIRETORIO_BASE, exist_ok=True)
+    PASTA_TMP = tempfile.mkdtemp(prefix="antigravity-upgrade-", dir=diretorio_temporario)
+    os.chmod(PASTA_TMP, 0o700)
+    return PASTA_TMP
+
+
+def limpar_diretorio_temporario():
+    global PASTA_TMP
+    if PASTA_TMP and os.path.isdir(PASTA_TMP):
+        shutil.rmtree(PASTA_TMP, ignore_errors=True)
+    PASTA_TMP = None
+
+
+def adquirir_bloqueio(caminho=ARQUIVO_LOCK):
+    """Mantém um lock exclusivo enquanto o processo estiver em execução."""
+    global LOCK_HANDLE
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(caminho, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    handle = os.fdopen(fd, "a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError("Outra atualização do Antigravity já está em execução.")
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    LOCK_HANDLE = handle
+    return handle
+
+
+def liberar_bloqueio():
+    global LOCK_HANDLE
+    if LOCK_HANDLE is not None:
+        fcntl.flock(LOCK_HANDLE.fileno(), fcntl.LOCK_UN)
+        LOCK_HANDLE.close()
+        LOCK_HANDLE = None
+
+
+def liberar_recursos():
+    limpar_diretorio_temporario()
+    liberar_bloqueio()
+
+
+def codigo_saida(sucesso):
+    """Traduz o resultado agregado para o contrato de processos Unix."""
+    return 0 if sucesso else 1
 
 # Classe para spinner animado
 class TerminalSpinner:
@@ -181,9 +253,7 @@ def menu_selecao():
     print(f"{CLR_HEADER}╠{'═' * largura_total}╣{CLR_RESET}")
     
     def print_opcao(num, desc):
-        # Visualmente o texto tem: "  [num] desc"
-        # Sem cores isso tem largura: 2 (espaço) + 3 ("[%d]" % num) + 1 (espaço) + len(desc) = 6 + len(desc)
-        espacos = largura_total - 6 - len(desc)
+        espacos = largura_total - 5 - len(str(num)) - len(desc)
         print(f"{CLR_HEADER}║{CLR_RESET}  {CLR_CYAN}[{num}]{CLR_WHITE} {desc}{CLR_RESET}{' ' * espacos}{CLR_HEADER}║{CLR_RESET}")
         
     print_opcao(1, "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)")
@@ -192,14 +262,18 @@ def menu_selecao():
     print_opcao(4, "Forçar Reinstalação de Ambos (Mesmo na mesma versão)")
     print_opcao(5, "Consultar Changelog Oficial (com tradução)")
     print_opcao(6, "Sair")
+    print_opcao(7, "Mostrar Versões Ativas")
+    print_opcao(8, "Listar Histórico de Versões")
+    print_opcao(9, "Rollback de Ambos para a Versão Anterior")
+    print_opcao(10, "Limpar Histórico Antigo (Manter 2)")
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}")
     
     while True:
         try:
-            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-6): {CLR_RESET}").strip()
-            if opcao in ("1", "2", "3", "4", "5", "6"):
+            opcao = input(f"\n{CLR_WHITE}Digite sua escolha (1-10): {CLR_RESET}").strip()
+            if opcao in tuple(str(numero) for numero in range(1, 11)):
                 return opcao
-            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 6.{CLR_RESET}")
+            print(f"{CLR_FAIL}Opção inválida! Escolha um número de 1 a 10.{CLR_RESET}")
         except (KeyboardInterrupt, EOFError):
             print(f"\n{CLR_WARNING}Operação cancelada pelo usuário.{CLR_RESET}")
             return "5"
@@ -212,7 +286,7 @@ def obter_data_servidor(url):
         method="HEAD"
     )
     try:
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
             last_modified = response.info().get("Last-Modified")
             if last_modified:
                 dt = email.utils.parsedate_to_datetime(last_modified)
@@ -222,19 +296,49 @@ def obter_data_servidor(url):
     return None
 
 # Função para requisições HTTP
-def fetch_url(url):
+def fetch_url(url, retries=HTTP_RETRIES):
     req = urllib.request.Request(
         url,
         headers={"Accept-Encoding": "gzip", "User-Agent": "Mozilla/5.0"}
     )
-    try:
-        with urllib.request.urlopen(req) as response:
-            content = response.read()
-            if response.info().get("Content-Encoding") == "gzip":
-                content = gzip.decompress(content)
-            return content.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
+    for tentativa in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+                content = response.read()
+                if response.info().get("Content-Encoding") == "gzip":
+                    content = gzip.decompress(content)
+                return content.decode("utf-8", errors="ignore")
+        except Exception:
+            if tentativa < retries:
+                time.sleep(tentativa)
+    return ""
+
+
+def validar_url_download(url):
+    """Aceita somente URLs HTTPS completas de arquivos tar.gz."""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("A URL de download precisa usar HTTPS e possuir um host válido.")
+    if parsed.username or parsed.password:
+        raise ValueError("A URL de download não pode conter credenciais.")
+    if not parsed.path.endswith(".tar.gz"):
+        raise ValueError("A URL de download precisa apontar para um arquivo .tar.gz.")
+    return url
+
+
+def obter_checksum_remoto(url):
+    """Obtém um SHA-256 publicado ao lado do pacote, quando disponível."""
+    conteudo = fetch_url(f"{url}.sha256", retries=1)
+    match = re.search(r"(?i)(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", conteudo)
+    return match.group(0).lower() if match else None
+
+
+def calcular_sha256(caminho):
+    digest = hashlib.sha256()
+    with open(caminho, "rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
+            digest.update(bloco)
+    return digest.hexdigest()
 
 # Retorna o idioma preferencial do sistema (pt_BR.UTF-8 -> pt).
 def obter_idioma_sistema():
@@ -342,37 +446,55 @@ def consultar_changelog():
     return encontrados
 
 # Download com barra de progresso animada
-def download_com_progresso(url, dest_path, app_name):
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req) as response:
-            total_size = int(response.info().get("Content-Length", 0))
-            bloco_size = 1024 * 64
-            downloaded = 0
-            
-            with open(dest_path, "wb") as out_file:
-                while True:
-                    buffer = response.read(bloco_size)
-                    if not buffer:
-                        break
-                    out_file.write(buffer)
-                    downloaded += len(buffer)
-                    
-                    if total_size > 0:
-                        percent = int(100 * downloaded / total_size)
-                        num_hashes = percent // 2
-                        bar_str = "#" * num_hashes + "." * (50 - num_hashes)
-                        sys.stdout.write(
-                            f"\r  {CLR_BLUE}Baixando {app_name}: [{bar_str}] {percent}% "
-                            f"({downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB){CLR_RESET}"
-                        )
-                        sys.stdout.flush()
+def download_com_progresso(url, dest_path, app_name, checksum_esperado=None):
+    validar_url_download(url)
+    arquivo_parcial = f"{dest_path}.part"
+    ultimo_erro = None
+    for tentativa in range(1, HTTP_RETRIES + 1):
+        downloaded = 0
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
+                url_final = response.geturl() if hasattr(response, "geturl") else url
+                validar_url_download(url_final)
+                total_size = int(response.info().get("Content-Length", 0))
+                if total_size > MAX_DOWNLOAD_BYTES:
+                    raise ValueError("O pacote excede o limite máximo permitido.")
+                with open(arquivo_parcial, "wb") as out_file:
+                    while True:
+                        buffer = response.read(1024 * 64)
+                        if not buffer:
+                            break
+                        downloaded += len(buffer)
+                        if downloaded > MAX_DOWNLOAD_BYTES:
+                            raise ValueError("O pacote excede o limite máximo permitido.")
+                        out_file.write(buffer)
+                        if total_size > 0:
+                            percent = min(100, int(100 * downloaded / total_size))
+                            bar_str = "#" * (percent // 2) + "." * (50 - percent // 2)
+                            sys.stdout.write(
+                                f"\r  {CLR_BLUE}Baixando {app_name}: [{bar_str}] {percent}% "
+                                f"({downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB){CLR_RESET}"
+                            )
+                            sys.stdout.flush()
+            if downloaded == 0:
+                raise ValueError("O arquivo baixado está vazio.")
+            digest = calcular_sha256(arquivo_parcial)
+            if checksum_esperado and digest != checksum_esperado.lower():
+                raise ValueError("O SHA-256 do pacote não corresponde ao checksum publicado.")
+            os.replace(arquivo_parcial, dest_path)
             sys.stdout.write("\n")
             return True
-    except Exception as e:
-        sys.stdout.write("\n")
-        print(f"  {CLR_FAIL}Erro ao fazer o download: {e}{CLR_RESET}")
-        return False
+        except Exception as erro:
+            ultimo_erro = erro
+            if os.path.exists(arquivo_parcial):
+                os.unlink(arquivo_parcial)
+            if tentativa < HTTP_RETRIES:
+                print(f"\n  {CLR_WARNING}Tentativa {tentativa} falhou; tentando novamente...{CLR_RESET}")
+                time.sleep(tentativa)
+    sys.stdout.write("\n")
+    print(f"  {CLR_FAIL}Erro ao fazer o download após {HTTP_RETRIES} tentativas: {ultimo_erro}{CLR_RESET}")
+    return False
 
 # Cria atalho no Desktop do usuário
 def criar_atalho(nome_app):
@@ -445,6 +567,353 @@ Categories=Development;
         spinner_shortcut.stop(success=False, final_msg=f"Erro ao criar atalho no desktop: {e}")
         return False
 
+
+def _partes_caminho_tar(caminho):
+    if not caminho or "\x00" in caminho or posixpath.isabs(caminho):
+        raise ValueError(f"Caminho inseguro no pacote: {caminho!r}")
+    partes = [parte for parte in caminho.split("/") if parte not in ("", ".")]
+    if not partes or ".." in partes:
+        raise ValueError(f"Caminho inseguro no pacote: {caminho!r}")
+    return partes
+
+
+def preparar_membros_tar(tar):
+    """Valida e adapta membros para uma extração com strip-components=1."""
+    membros = tar.getmembers()
+    if len(membros) > MAX_ARCHIVE_MEMBERS:
+        raise ValueError("O pacote contém arquivos demais.")
+    tamanho_total = sum(membro.size for membro in membros if membro.isfile())
+    if tamanho_total > MAX_EXTRACTED_BYTES:
+        raise ValueError("O conteúdo descompactado excede o limite permitido.")
+
+    seguros = []
+    caminhos_links = set()
+    for membro in membros:
+        if membro.ischr() or membro.isblk() or membro.isfifo():
+            raise ValueError(f"Tipo de arquivo não permitido no pacote: {membro.name}")
+        partes = _partes_caminho_tar(membro.name)
+        if len(partes) == 1:
+            continue
+        membro.name = "/".join(partes[1:])
+
+        if membro.issym():
+            alvo = membro.linkname
+            if not alvo or posixpath.isabs(alvo):
+                raise ValueError(f"Link simbólico inseguro no pacote: {membro.name}")
+            resolvido = posixpath.normpath(posixpath.join(posixpath.dirname(membro.name), alvo))
+            if resolvido == ".." or resolvido.startswith("../"):
+                raise ValueError(f"Link simbólico escapa do staging: {membro.name}")
+            caminhos_links.add(membro.name.rstrip("/"))
+        elif membro.islnk():
+            partes_alvo = _partes_caminho_tar(membro.linkname)
+            if len(partes_alvo) == 1:
+                raise ValueError(f"Hard link inválido no pacote: {membro.name}")
+            membro.linkname = "/".join(partes_alvo[1:])
+        seguros.append(membro)
+
+    for membro in seguros:
+        partes = membro.name.split("/")
+        pais = {"/".join(partes[:indice]) for indice in range(1, len(partes))}
+        if pais & caminhos_links:
+            raise ValueError(f"Arquivo seria extraído através de um link: {membro.name}")
+    return seguros
+
+
+def extrair_pacote_seguro(arquivo_tar, destino):
+    """Extrai um pacote validado para um diretório vazio de staging."""
+    if os.listdir(destino):
+        raise ValueError("O diretório de staging precisa estar vazio.")
+    with tarfile.open(arquivo_tar, "r:gz") as tar:
+        membros = preparar_membros_tar(tar)
+        kwargs = {}
+        if "filter" in inspect.signature(tar.extractall).parameters:
+            kwargs["filter"] = "data"
+        tar.extractall(path=destino, members=membros, **kwargs)
+
+
+def validar_instalacao_extraida(nome_app, staging):
+    executavel = "antigravity" if nome_app == "Antigravity" else "antigravity-ide"
+    caminho = os.path.join(staging, executavel)
+    if not os.path.isfile(caminho):
+        raise ValueError(f"Executável esperado não encontrado: {executavel}")
+    if not os.access(caminho, os.X_OK):
+        raise ValueError(f"Executável sem permissão de execução: {executavel}")
+    return caminho
+
+
+def normalizar_permissoes_staging(staging):
+    """Remove bits privilegiados e torna a raiz da versão atravessável."""
+    os.chmod(staging, 0o755)
+    for raiz, diretorios, arquivos in os.walk(staging, followlinks=False):
+        for nome in diretorios + arquivos:
+            caminho = os.path.join(raiz, nome)
+            if os.path.islink(caminho):
+                continue
+            modo = stat.S_IMODE(os.lstat(caminho).st_mode)
+            if modo & 0o6000:
+                os.chmod(caminho, modo & ~0o6000)
+
+
+def preparar_versao_em_staging(nome_app, versao, arquivo_tar, url, sha256, checksum_verificado):
+    pasta_versoes = os.path.join(DIRETORIO_BASE, f"{nome_app}_VERSOES")
+    os.makedirs(pasta_versoes, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix=f".{nome_app}-{versao}-", dir=pasta_versoes)
+    destino = os.path.join(pasta_versoes, f"{nome_app}-{versao}")
+    if os.path.lexists(destino):
+        destino = f"{destino}-reinstall-{time.time_ns()}"
+    try:
+        extrair_pacote_seguro(arquivo_tar, staging)
+        validar_instalacao_extraida(nome_app, staging)
+        normalizar_permissoes_staging(staging)
+        with open(os.path.join(staging, "version.txt"), "w", encoding="utf-8") as arquivo:
+            arquivo.write(f"{versao}\n")
+        manifesto = {
+            "app": nome_app,
+            "version": versao,
+            "source_url": url,
+            "sha256": sha256,
+            "checksum_verified": checksum_verificado,
+            "installed_at": datetime.now().astimezone().isoformat(),
+        }
+        with open(os.path.join(staging, ".install-manifest.json"), "w", encoding="utf-8") as arquivo:
+            json.dump(manifesto, arquivo, ensure_ascii=False, indent=2)
+            arquivo.write("\n")
+
+        os.replace(staging, destino)
+        return destino
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def pasta_versoes(nome_app):
+    return os.path.join(DIRETORIO_BASE, f"{nome_app}_VERSOES")
+
+
+def caminho_estado(nome_app):
+    return os.path.join(DIRETORIO_BASE, f".{nome_app}-state")
+
+
+def caminho_relativo_versao(nome_app, caminho):
+    raiz = os.path.realpath(pasta_versoes(nome_app))
+    resolvido = os.path.realpath(caminho)
+    if resolvido == raiz or os.path.commonpath((raiz, resolvido)) != raiz or not os.path.isdir(resolvido):
+        raise ValueError("A versão não pertence ao histórico gerenciado.")
+    return os.path.relpath(resolvido, DIRETORIO_BASE)
+
+
+def ler_estado(nome_app):
+    estado = {}
+    try:
+        with open(caminho_estado(nome_app), "r", encoding="utf-8") as arquivo:
+            for linha in arquivo:
+                chave, separador, valor = linha.rstrip("\n").partition("=")
+                if separador and chave in ("active", "previous") and valor:
+                    candidato = os.path.join(DIRETORIO_BASE, valor)
+                    caminho_relativo_versao(nome_app, candidato)
+                    estado[chave] = os.path.realpath(candidato)
+    except (OSError, ValueError):
+        return {}
+    return estado
+
+
+def gravar_estado(nome_app, ativo, anterior=None):
+    destino = caminho_estado(nome_app)
+    temporario = f"{destino}.tmp-{os.getpid()}"
+    linhas = [f"active={caminho_relativo_versao(nome_app, ativo)}\n"]
+    if anterior and os.path.realpath(anterior) != os.path.realpath(ativo):
+        linhas.append(f"previous={caminho_relativo_versao(nome_app, anterior)}\n")
+    with open(temporario, "w", encoding="utf-8") as arquivo:
+        arquivo.writelines(linhas)
+        arquivo.flush()
+        os.fsync(arquivo.fileno())
+    os.chmod(temporario, 0o600)
+    os.replace(temporario, destino)
+
+
+def obter_versao_ativa(nome_app):
+    link = os.path.join(DIRETORIO_BASE, nome_app)
+    if not os.path.islink(link):
+        return None
+    try:
+        caminho_relativo_versao(nome_app, link)
+    except ValueError:
+        return None
+    return os.path.realpath(link)
+
+
+def ler_numero_versao(caminho):
+    try:
+        with open(os.path.join(caminho, "version.txt"), "r", encoding="utf-8") as arquivo:
+            return arquivo.read().strip()
+    except OSError:
+        return os.path.basename(caminho).split("-", 1)[-1]
+
+
+def chave_versao(valor):
+    numeros = re.match(r"^(\d+)\.(\d+)\.(\d+)(.*)$", valor)
+    if not numeros:
+        return (0, 0, 0, valor)
+    return tuple(int(item) for item in numeros.groups()[:3]) + (numeros.group(4),)
+
+
+def listar_versoes(nome_app):
+    raiz = pasta_versoes(nome_app)
+    ativa = obter_versao_ativa(nome_app)
+    if not os.path.isdir(raiz):
+        return []
+    versoes = []
+    for entrada in os.scandir(raiz):
+        if entrada.name.startswith(".") or not entrada.is_dir(follow_symlinks=False):
+            continue
+        caminho = entrada.path
+        versoes.append({
+            "version": ler_numero_versao(caminho),
+            "path": caminho,
+            "active": ativa == os.path.realpath(caminho),
+            "installed_at": entrada.stat(follow_symlinks=False).st_mtime,
+        })
+    return sorted(
+        versoes,
+        key=lambda item: (chave_versao(item["version"]), item["installed_at"]),
+        reverse=True,
+    )
+
+
+def resolver_versao(nome_app, versao):
+    encontradas = [item["path"] for item in listar_versoes(nome_app) if item["version"] == versao]
+    if not encontradas:
+        raise ValueError(f"Versão não encontrada para {nome_app}: {versao}")
+    return encontradas[0]
+
+
+def testar_saude_versao(nome_app, caminho):
+    executavel = validar_instalacao_extraida(nome_app, caminho)
+    ambiente = os.environ.copy()
+    ambiente["ELECTRON_RUN_AS_NODE"] = "1"
+    try:
+        resultado = subprocess.run(
+            [executavel, "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=HEALTHCHECK_TIMEOUT,
+            env=ambiente,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as erro:
+        raise RuntimeError(f"Health check não pôde ser executado: {erro}") from erro
+    if resultado.returncode != 0 or not resultado.stdout.strip():
+        detalhe = resultado.stderr.strip().splitlines()[-1] if resultado.stderr.strip() else "sem resposta"
+        raise RuntimeError(f"Health check falhou ({resultado.returncode}): {detalhe}")
+    return resultado.stdout.strip().splitlines()[0]
+
+
+def _trocar_link_atomico(nome_app, destino):
+    link = os.path.join(DIRETORIO_BASE, nome_app)
+    if os.path.lexists(link) and not os.path.islink(link):
+        raise RuntimeError(f"O caminho ativo não é um link simbólico gerenciado: {link}")
+    relativo = caminho_relativo_versao(nome_app, destino)
+    temporario = os.path.join(DIRETORIO_BASE, f".{nome_app}.link-{os.getpid()}-{time.time_ns()}")
+    os.symlink(relativo, temporario)
+    try:
+        os.replace(temporario, link)
+    finally:
+        if os.path.lexists(temporario):
+            os.unlink(temporario)
+
+
+def ativar_versao_atomica(nome_app, destino):
+    destino = os.path.realpath(destino)
+    anterior = obter_versao_ativa(nome_app)
+    estado_anterior = ler_estado(nome_app)
+    versao_reportada = testar_saude_versao(nome_app, destino)
+    _trocar_link_atomico(nome_app, destino)
+    try:
+        testar_saude_versao(nome_app, os.path.join(DIRETORIO_BASE, nome_app))
+        candidato_anterior = anterior
+        if anterior and anterior == destino:
+            candidato_anterior = estado_anterior.get("previous")
+        gravar_estado(nome_app, destino, candidato_anterior)
+    except Exception:
+        if anterior:
+            _trocar_link_atomico(nome_app, anterior)
+        else:
+            os.unlink(os.path.join(DIRETORIO_BASE, nome_app))
+        raise
+    return versao_reportada
+
+
+def rollback_aplicativo(nome_app, versao=None):
+    ativa = obter_versao_ativa(nome_app)
+    if versao:
+        destino = resolver_versao(nome_app, versao)
+    else:
+        estado = ler_estado(nome_app)
+        destino = estado.get("previous")
+        if not destino or destino == ativa or not os.path.isdir(destino):
+            destino = next((item["path"] for item in listar_versoes(nome_app) if not item["active"]), None)
+    if not destino:
+        raise ValueError(f"Não existe versão anterior disponível para {nome_app}.")
+    if ativa and os.path.realpath(destino) == ativa:
+        raise ValueError("A versão solicitada já está ativa.")
+    resultado = ativar_versao_atomica(nome_app, destino)
+    return ler_numero_versao(destino), resultado
+
+
+def podar_versoes(nome_app, manter=2):
+    if manter < 1:
+        raise ValueError("A retenção precisa ser pelo menos 1.")
+    versoes = listar_versoes(nome_app)
+    protegidas = set()
+    ativa = obter_versao_ativa(nome_app)
+    if ativa:
+        protegidas.add(ativa)
+    anterior = ler_estado(nome_app).get("previous")
+    if anterior and os.path.isdir(anterior):
+        protegidas.add(os.path.realpath(anterior))
+    for item in versoes:
+        if len(protegidas) >= manter:
+            break
+        protegidas.add(os.path.realpath(item["path"]))
+
+    removidas = []
+    for item in versoes:
+        caminho = os.path.realpath(item["path"])
+        if caminho not in protegidas:
+            shutil.rmtree(caminho)
+            removidas.append(item["version"])
+    return removidas
+
+
+def exibir_estado_aplicativos(nomes, detalhado=False):
+    for nome_app in nomes:
+        versoes = listar_versoes(nome_app)
+        ativa = next((item for item in versoes if item["active"]), None)
+        if not detalhado:
+            valor = ativa["version"] if ativa else "não instalada"
+            print(f"{nome_app}: {valor}")
+            continue
+        print(f"\n{nome_app}:")
+        if not versoes:
+            print("  Nenhuma versão instalada.")
+        for item in versoes:
+            marcador = "*" if item["active"] else " "
+            data = datetime.fromtimestamp(item["installed_at"]).strftime("%d/%m/%Y %H:%M:%S")
+            print(f"  {marcador} {item['version']}  ({data})")
+
+
+def selecionar_aplicativos(argumentos):
+    hub = any(item in ("hub", "antigravity") for item in argumentos)
+    ide = any(item in ("ide", "antigravity-ide") for item in argumentos)
+    if hub and not ide:
+        return ["Antigravity"]
+    if ide and not hub:
+        return ["Antigravity_IDE"]
+    return ["Antigravity", "Antigravity_IDE"]
+
+
 # Função interna para processar cada um dos aplicativos
 def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
     print(f"\n{CLR_BLUE}⚡ Analisando: {nome_app} ({padrao_url}) {CLR_RESET}")
@@ -461,6 +930,12 @@ def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
 
     if not url_download:
         print(f"  {CLR_WARNING}⚠ Link de download não disponível para {nome_app} ({ARCH_ALVO}).{CLR_RESET}")
+        return False
+
+    try:
+        validar_url_download(url_download)
+    except ValueError as erro:
+        print(f"  {CLR_FAIL}URL de download rejeitada: {erro}{CLR_RESET}")
         return False
 
     # 2. Extrair a versão a partir do link de download
@@ -504,73 +979,48 @@ def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
             print(f"  {CLR_WARNING}➜ Nova versão disponível! Inicializando download...{CLR_RESET}")
         arquivo_tar = os.path.join(PASTA_TMP, f"{nome_app}.tar.gz")
 
-        # Download do arquivo com progresso
-        if not download_com_progresso(url_download, arquivo_tar, nome_app):
+        checksum_esperado = obter_checksum_remoto(url_download)
+        if checksum_esperado:
+            print(f"  {CLR_BLUE}SHA-256 oficial encontrado; o pacote será verificado.{CLR_RESET}")
+        else:
+            print(f"  {CLR_WARNING}Checksum oficial não publicado; o SHA-256 local será registrado.{CLR_RESET}")
+
+        # Download do arquivo com progresso e publicação somente após validação.
+        if not download_com_progresso(url_download, arquivo_tar, nome_app, checksum_esperado):
             return False
 
         if not os.path.exists(arquivo_tar) or os.path.getsize(arquivo_tar) == 0:
             print(f"  {CLR_FAIL}Erro: Arquivo baixado está vazio.{CLR_RESET}")
             return False
 
-        # Cria pasta específica da versão
-        pasta_nova_versao = os.path.join(DIRETORIO_BASE, f"{nome_app}_VERSOES", f"{nome_app}-{versao_web}")
-        os.makedirs(pasta_nova_versao, exist_ok=True)
-
         spinner_extrai = TerminalSpinner(f"Extraindo arquivos para {nome_app}-{versao_web}")
         spinner_extrai.start()
 
         try:
-            # Extração equivalente a --strip-components=1
-            with tarfile.open(arquivo_tar, "r:gz") as tar:
-                members = []
-                for member in tar.getmembers():
-                    parts = member.name.split("/", 1)
-                    if len(parts) > 1 and parts[1]:  # Garante que não é um diretório raiz vazio
-                        member.name = parts[1]
-                        members.append(member)
-                
-                # Suporte à segurança de filtros no python 3.12+
-                kwargs = {}
-                if "filter" in inspect.signature(tar.extractall).parameters:
-                    kwargs["filter"] = "fully_trusted"
-                tar.extractall(path=pasta_nova_versao, members=members, **kwargs)
+            digest = calcular_sha256(arquivo_tar)
+            pasta_nova_versao = preparar_versao_em_staging(
+                nome_app,
+                versao_web,
+                arquivo_tar,
+                url_download,
+                digest,
+                checksum_esperado is not None,
+            )
         except Exception as e:
             spinner_extrai.stop(success=False, final_msg=f"Falha ao extrair {nome_app}: {e}")
-            if os.path.exists(pasta_nova_versao):
-                shutil.rmtree(pasta_nova_versao)
             return False
-
-        # Escreve a nova versão local
-        try:
-            with open(os.path.join(pasta_nova_versao, "version.txt"), "w") as f:
-                f.write(versao_web + "\n")
-        except Exception:
-            pass
 
         spinner_extrai.stop(success=True, final_msg=f"Extraído com sucesso para: {nome_app}-{versao_web}")
 
-        # Atualiza o Link Simbólico principal (usando caminho relativo para evitar problemas de montagem/codificação)
-        spinner_link = TerminalSpinner("Atualizando link simbólico do sistema")
+        spinner_link = TerminalSpinner("Testando e ativando a nova versão atomicamente")
         spinner_link.start()
-
-        if os.path.islink(pasta_app) or os.path.exists(pasta_app):
-            try:
-                if os.path.isdir(pasta_app) and not os.path.islink(pasta_app):
-                    shutil.rmtree(pasta_app)
-                else:
-                    os.unlink(pasta_app)
-            except Exception as e:
-                spinner_link.stop(success=False, final_msg=f"Erro ao remover link antigo: {e}")
-                return False
-
         try:
-            relative_target = os.path.join(f"{nome_app}_VERSOES", f"{nome_app}-{versao_web}")
-            os.symlink(relative_target, pasta_app)
+            versao_runtime = ativar_versao_atomica(nome_app, pasta_nova_versao)
         except Exception as e:
-            spinner_link.stop(success=False, final_msg=f"Erro ao criar link simbólico: {e}")
+            spinner_link.stop(success=False, final_msg=f"Falha ao ativar {nome_app}; versão anterior preservada: {e}")
             return False
 
-        spinner_link.stop(success=True, final_msg=f"Link simbólico atualizado: {nome_app} -> {relative_target}")
+        spinner_link.stop(success=True, final_msg=f"Versão ativada e saudável ({versao_runtime})")
         criar_atalho(nome_app)
         print(f"  {CLR_GREEN}✓ {nome_app} atualizado com sucesso!{CLR_RESET}")
         return True
@@ -580,6 +1030,15 @@ def atualizar_aplicativo(nome_app, padrao_url, aba_changelog, forcar=False):
         return True
 
 if __name__ == "__main__":
+    verificar_privilegios()
+    try:
+        adquirir_bloqueio()
+    except (OSError, RuntimeError) as erro:
+        print(f"{CLR_FAIL}{erro}{CLR_RESET}")
+        sys.exit(1)
+    atexit.register(liberar_recursos)
+    preparar_diretorios()
+
     # Exibe diagnósticos
     exibir_diagnosticos()
     
@@ -591,6 +1050,39 @@ if __name__ == "__main__":
     if "force" in args or "f" in args:
         forcar_reinstalacao = True
         args = [a for a in args if a not in ("force", "f")]
+
+    comandos_gerenciamento = ("current", "list", "rollback", "prune")
+    comando = next((item for item in args if item in comandos_gerenciamento), None)
+    if comando:
+        nomes = selecionar_aplicativos(args)
+        try:
+            if comando == "current":
+                exibir_estado_aplicativos(nomes)
+            elif comando == "list":
+                exibir_estado_aplicativos(nomes, detalhado=True)
+            elif comando == "rollback":
+                indice = args.index("rollback")
+                versao = args[indice + 1] if indice + 1 < len(args) and args[indice + 1] not in (
+                    "hub", "antigravity", "ide", "antigravity-ide"
+                ) else None
+                if versao and len(nomes) != 1:
+                    raise ValueError("Informe --hub ou --ide ao solicitar uma versão específica.")
+                for nome_app in nomes:
+                    nova_versao, runtime = rollback_aplicativo(nome_app, versao)
+                    print(f"{CLR_GREEN}✓ {nome_app} revertido para {nova_versao} ({runtime}).{CLR_RESET}")
+            elif comando == "prune":
+                indice = args.index("prune")
+                manter = 2
+                if indice + 1 < len(args) and args[indice + 1].isdigit():
+                    manter = int(args[indice + 1])
+                for nome_app in nomes:
+                    removidas = podar_versoes(nome_app, manter)
+                    resumo = ", ".join(removidas) if removidas else "nenhuma"
+                    print(f"{nome_app}: versões removidas: {resumo}")
+        except (OSError, ValueError, RuntimeError) as erro:
+            print(f"{CLR_FAIL}Erro: {erro}{CLR_RESET}")
+            sys.exit(1)
+        sys.exit(0)
 
     if len(args) > 0:
         arg = args[0]
@@ -606,6 +1098,14 @@ if __name__ == "__main__":
             opcao = "5"
         elif arg in ("6", "exit", "quit"):
             opcao = "6"
+        elif arg in ("7",):
+            opcao = "7"
+        elif arg in ("8",):
+            opcao = "8"
+        elif arg in ("9",):
+            opcao = "9"
+        elif arg in ("10",):
+            opcao = "10"
             
     if opcao is None:
         # Exibe menu de seleção se nenhum argumento válido for fornecido
@@ -616,6 +1116,27 @@ if __name__ == "__main__":
         forcar_reinstalacao = True
     elif opcao == "6":
         print(f"\n{CLR_BLUE}Saindo sem realizar alterações.{CLR_RESET}\n")
+        sys.exit(0)
+
+    if opcao in ("7", "8", "9", "10"):
+        nomes = ["Antigravity", "Antigravity_IDE"]
+        try:
+            if opcao == "7":
+                exibir_estado_aplicativos(nomes)
+            elif opcao == "8":
+                exibir_estado_aplicativos(nomes, detalhado=True)
+            elif opcao == "9":
+                for nome_app in nomes:
+                    versao, runtime = rollback_aplicativo(nome_app)
+                    print(f"{CLR_GREEN}✓ {nome_app} revertido para {versao} ({runtime}).{CLR_RESET}")
+            else:
+                for nome_app in nomes:
+                    removidas = podar_versoes(nome_app, 2)
+                    resumo = ", ".join(removidas) if removidas else "nenhuma"
+                    print(f"{nome_app}: versões removidas: {resumo}")
+        except (OSError, ValueError, RuntimeError) as erro:
+            print(f"{CLR_FAIL}Erro: {erro}{CLR_RESET}")
+            sys.exit(1)
         sys.exit(0)
 
     if opcao == "5":
@@ -671,3 +1192,7 @@ if __name__ == "__main__":
         print(f"\n{CLR_HEADER}======================================================={CLR_RESET}")
         print(f"{CLR_GREEN}  Processo concluído com sucesso!                      {CLR_RESET}")
         print(f"{CLR_HEADER}======================================================={CLR_RESET}")
+    else:
+        print(f"\n{CLR_FAIL}Processo concluído com falhas.{CLR_RESET}")
+
+    sys.exit(codigo_saida(sucesso))

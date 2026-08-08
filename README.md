@@ -11,6 +11,10 @@ Este repositório contém scripts de automação projetados para gerenciar, inst
 - **Notas de Versão**: Busca o changelog oficial e exibe no terminal o resumo, as melhorias, as correções e os patches correspondentes exatamente à versão disponível de cada aplicativo.
 - **Acesso Traduzido ao Changelog**: Detecta o idioma configurado no sistema e, quando ele não é inglês, disponibiliza um link do Google Tradutor para a aba oficial do produto no idioma local. Uma falha ao obter o changelog não bloqueia a instalação.
 - **Forçar Reinstalação**: Permite forçar o re-download e a reinstalação dos aplicativos mesmo quando as versões local e remota coincidirem.
+- **Instalação Protegida**: Usa uma sessão temporária privada, impede execuções concorrentes e nunca publica downloads parciais.
+- **Integridade e Staging**: Calcula SHA-256, valida o checksum oficial quando disponível e extrai pacotes somente após inspeção de segurança.
+- **Ativação Transacional**: Testa o executável, troca o link ativo atomicamente e restaura a versão anterior se o teste posterior falhar.
+- **Rollback e Retenção**: Lista o histórico, permite selecionar uma versão anterior e remove versões antigas sem apagar a ativa ou a anterior.
 - **Gerenciamento de Versões**: Mantém um histórico de versões instaladas dentro de subpastas específicas (ex: `Antigravity_VERSOES/Antigravity-X.Y.Z`).
 - **Links Simbólicos Dinâmicos**: Atualiza um link simbólico que aponta sempre para a versão ativa/mais recente, garantindo que atalhos e referências ao executável nunca fiquem obsoletos.
 - **Feedback Visual Avançado**: Inclui barras de progresso animadas para downloads e indicadores de carregamento (spinners) para operações de extração e linkagem.
@@ -36,6 +40,9 @@ Dê permissão de execução aos scripts antes do primeiro uso:
 chmod +x upgrade.py upgrade.sh
 ```
 
+O script Python utiliza apenas a biblioteca padrão. A implementação Bash requer
+`curl`, GNU `tar`, `flock`, `mktemp` e `sha256sum`.
+
 > [!IMPORTANT]
 > Como o diretório base de instalação é `/opt/antigravity_apps`, os scripts **devem ser executados com privilégios de administrador (usando `sudo`)**. Os scripts possuem verificação nativa para garantir a execução correta e gerenciam automaticamente a propriedade do atalho criado na Área de Trabalho para que ele pertença ao seu usuário comum (não ao `root`).
 
@@ -55,6 +62,10 @@ sudo ./upgrade.sh
 4. Forçar Reinstalação de Ambos (Mesmo na mesma versão)
 5. Consultar Changelog Oficial (com tradução)
 6. Sair
+7. Mostrar versões ativas
+8. Listar histórico de versões
+9. Fazer rollback de ambos para a versão anterior
+10. Limpar histórico antigo, preservando ativa e anterior
 
 ### Modo Não Interativo / Automação (CLI)
 Você pode passar a opção desejada como argumento ao invocar o comando com `sudo` para ignorar o menu interativo:
@@ -82,6 +93,35 @@ sudo ./upgrade.py --changelog
 sudo ./upgrade.sh changelog
 ```
 
+### Gerenciamento das versões instaladas
+
+Os comandos abaixo não acessam a rede:
+
+```bash
+# Mostrar apenas as versões ativas
+sudo ./upgrade.py --current
+sudo ./upgrade.sh current
+
+# Listar todo o histórico; use --hub ou --ide para filtrar
+sudo ./upgrade.py --list --hub
+sudo ./upgrade.sh list ide
+
+# Voltar para a versão anterior registrada
+sudo ./upgrade.py --rollback --hub
+sudo ./upgrade.sh rollback hub
+
+# Selecionar explicitamente uma versão
+sudo ./upgrade.py --rollback 2.5.0-5471848641724416 --hub
+sudo ./upgrade.sh rollback 2.5.0-5471848641724416 hub
+
+# Manter pelo menos duas versões por aplicativo
+sudo ./upgrade.py --prune 2
+sudo ./upgrade.sh prune 2
+```
+
+`prune` sempre preserva a versão ativa e a anterior disponível para rollback;
+portanto, `--prune 1` ainda poderá conservar duas versões.
+
 ---
 
 ## 🔄 Atualização Automática via Systemd (`systemctl`)
@@ -104,7 +144,8 @@ Neste modo, o Systemd executa o script de atualização de forma recorrente (ex:
    Type=oneshot
    # Ajuste o caminho para o local do seu script e selecione python3 ou bash
    ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py --both
-   User=rguedes
+   # O instalador atual grava em /opt e exige privilégios administrativos.
+   User=root
    ```
 
 2. **Criar o arquivo de timer** (`/etc/systemd/system/antigravity-upgrade.timer`):
@@ -141,7 +182,8 @@ Neste modo, o script verifica se há atualizações disponíveis toda vez que o 
    [Service]
    Type=oneshot
    ExecStart=/usr/bin/python3 /opt/antigravity_apps/upgrade.py --both
-   User=rguedes
+   # O instalador atual grava em /opt e exige privilégios administrativos.
+   User=root
 
    [Install]
    WantedBy=multi-user.target
@@ -178,6 +220,27 @@ Quando os scripts são executados, eles geram uma estrutura de arquivos local pa
 - `Antigravity_IDE/` - Link simbólico para a versão ativa do Antigravity IDE.
 - `Antigravity_VERSOES/` - Pasta com as diferentes versões baixadas do Antigravity Hub.
 - `Antigravity_IDE_VERSOES/` - Pasta com as diferentes versões baixadas do Antigravity IDE.
+
+---
+
+## 🧪 Desenvolvimento e Qualidade
+
+O plano de evolução está documentado em [ROADMAP.md](ROADMAP.md), com os limites
+de segurança atuais em [SECURITY.md](SECURITY.md) e a direção técnica em
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+Para executar as verificações Python em um ambiente virtual:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/pytest
+.venv/bin/ruff check upgrade.py tests
+.venv/bin/mypy upgrade.py
+```
+
+O script Bash é verificado na integração contínua com `bash -n`, ShellCheck e
+shfmt. O mesmo conjunto é executado automaticamente pelo workflow de qualidade.
 
 ---
 

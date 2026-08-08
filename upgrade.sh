@@ -13,8 +13,12 @@ CLR_WHITE="\033[37m"
 
 # Diretório base de instalação
 DIRETORIO_BASE="/opt/antigravity_apps"
-PASTA_TMP="/tmp/antigravity_upgrade"
+PASTA_TMP=""
+ARQUIVO_LOCK="/run/lock/antigravity-updater.lock"
 URL_CHANGELOG="https://antigravity.google/changelog"
+MAX_DOWNLOAD_BYTES=$((4 * 1024 * 1024 * 1024))
+MAX_EXTRACTED_BYTES=$((12 * 1024 * 1024 * 1024))
+MAX_ARCHIVE_MEMBERS=200000
 
 # Verificar privilégios de administrador (root)
 if [ "$EUID" -ne 0 ]; then
@@ -22,6 +26,13 @@ if [ "$EUID" -ne 0 ]; then
     echo -e "${CLR_WARNING}Por favor, execute novamente usando: sudo \$0${CLR_RESET}\n"
     exit 1
 fi
+
+for comando in curl tar flock mktemp sha256sum realpath timeout; do
+    if ! command -v "$comando" >/dev/null 2>&1; then
+        echo -e "${CLR_FAIL}Erro: dependência obrigatória não encontrada: $comando${CLR_RESET}"
+        exit 1
+    fi
+done
 
 # Detecta automaticamente a arquitetura do Ubuntu do usuário
 ARCH_ATUAL=$(uname -m)
@@ -34,9 +45,297 @@ else
     exit 1
 fi
 
-# Criar os diretórios necessários
+# Criar uma sessão privada e impedir execuções concorrentes.
+umask 077
 mkdir -p "$DIRETORIO_BASE"
-mkdir -p "$PASTA_TMP"
+PASTA_TMP=$(mktemp -d "${TMPDIR:-/tmp}/antigravity-upgrade.XXXXXXXX") || exit 1
+chmod 700 "$PASTA_TMP"
+
+limpar_recursos() {
+    if [ -n "${SPINNER_PID:-}" ]; then
+        kill "$SPINNER_PID" 2>/dev/null || true
+    fi
+    if [ -n "$PASTA_TMP" ] && [ -d "$PASTA_TMP" ]; then
+        rm -rf -- "$PASTA_TMP"
+    fi
+}
+trap limpar_recursos EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+exec 9>"$ARQUIVO_LOCK"
+chmod 600 "$ARQUIVO_LOCK"
+if ! flock -n 9; then
+    echo -e "${CLR_FAIL}Outra atualização do Antigravity já está em execução.${CLR_RESET}"
+    exit 1
+fi
+printf '%s\n' "$$" 1>&9
+
+curl_seguro() {
+    curl --fail --show-error --location --retry 3 --retry-all-errors \
+        --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 1800 "$@"
+}
+
+validar_url_download() {
+    local URL="$1"
+    [[ "$URL" =~ ^https://[^/@[:space:]]+(/[^[:space:]]*)?\.tar\.gz$ ]]
+}
+
+validar_pacote_tar() {
+    local ARQUIVO="$1"
+    local LISTA="$PASTA_TMP/tar-members.txt"
+    local DETALHES="$PASTA_TMP/tar-details.txt"
+    tar -tzf "$ARQUIVO" >"$LISTA" || return 1
+    tar --numeric-owner -tvzf "$ARQUIVO" >"$DETALHES" || return 1
+
+    if grep -Eq '(^/|(^|/)\.\.(/|$))' "$LISTA"; then
+        echo "O pacote contém caminhos absolutos ou path traversal." >&2
+        return 1
+    fi
+    if awk 'substr($1, 1, 1) ~ /^[bcp]$/ { found=1 } END { exit !found }' "$DETALHES"; then
+        echo "O pacote contém dispositivos ou pipes especiais." >&2
+        return 1
+    fi
+    if grep -Eq -- '( -> | link to )(/|([^/]+/)*\.\.(/|$))' "$DETALHES"; then
+        echo "O pacote contém links que podem escapar do staging." >&2
+        return 1
+    fi
+
+    local QUANTIDADE TAMANHO
+    QUANTIDADE=$(wc -l <"$LISTA")
+    TAMANHO=$(awk '{ if ($3 ~ /^[0-9]+$/) total += $3 } END { print total + 0 }' "$DETALHES")
+    [ "$QUANTIDADE" -le "$MAX_ARCHIVE_MEMBERS" ] || return 1
+    [ "$TAMANHO" -le "$MAX_EXTRACTED_BYTES" ] || return 1
+}
+
+pasta_versoes() {
+    printf '%s/%s_VERSOES' "$DIRETORIO_BASE" "$1"
+}
+
+versao_ativa() {
+    local NOME_APP="$1"
+    local LINK="$DIRETORIO_BASE/$NOME_APP"
+    local RAIZ DESTINO
+    [ -L "$LINK" ] || return 1
+    RAIZ=$(realpath -m "$(pasta_versoes "$NOME_APP")")
+    DESTINO=$(realpath -e "$LINK" 2>/dev/null) || return 1
+    case "$DESTINO/" in
+        "$RAIZ"/*/) printf '%s\n' "$DESTINO" ;;
+        *) return 1 ;;
+    esac
+}
+
+versao_diretorio() {
+    local DIRETORIO="$1"
+    if [ -s "$DIRETORIO/version.txt" ]; then
+        head -n 1 "$DIRETORIO/version.txt"
+    else
+        basename "$DIRETORIO" | sed -E 's/^[^-]+-//'
+    fi
+}
+
+ler_estado_valor() {
+    local NOME_APP="$1"
+    local CHAVE="$2"
+    local ESTADO="$DIRETORIO_BASE/.${NOME_APP}-state"
+    local RELATIVO CANDIDATO RAIZ
+    [ -f "$ESTADO" ] || return 1
+    RELATIVO=$(sed -n "s/^${CHAVE}=//p" "$ESTADO" | head -n 1)
+    [ -n "$RELATIVO" ] || return 1
+    CANDIDATO=$(realpath -e "$DIRETORIO_BASE/$RELATIVO" 2>/dev/null) || return 1
+    RAIZ=$(realpath -m "$(pasta_versoes "$NOME_APP")")
+    case "$CANDIDATO/" in
+        "$RAIZ"/*/) printf '%s\n' "$CANDIDATO" ;;
+        *) return 1 ;;
+    esac
+}
+
+gravar_estado() {
+    local NOME_APP="$1"
+    local ATIVO="$2"
+    local ANTERIOR="${3:-}"
+    local ESTADO="$DIRETORIO_BASE/.${NOME_APP}-state"
+    local TEMPORARIO="${ESTADO}.tmp-$$"
+    local ATIVO_RELATIVO ANTERIOR_RELATIVO=""
+    ATIVO_RELATIVO=$(realpath --relative-to="$DIRETORIO_BASE" "$ATIVO") || return 1
+    if [ -n "$ANTERIOR" ] && [ "$ANTERIOR" != "$ATIVO" ]; then
+        ANTERIOR_RELATIVO=$(realpath --relative-to="$DIRETORIO_BASE" "$ANTERIOR") || return 1
+    fi
+    printf 'active=%s\n' "$ATIVO_RELATIVO" >"$TEMPORARIO"
+    [ -n "$ANTERIOR_RELATIVO" ] && printf 'previous=%s\n' "$ANTERIOR_RELATIVO" >>"$TEMPORARIO"
+    chmod 600 "$TEMPORARIO"
+    mv -Tf -- "$TEMPORARIO" "$ESTADO"
+}
+
+testar_saude_versao() {
+    local NOME_APP="$1"
+    local DIRETORIO="$2"
+    local EXECUTAVEL SAIDA
+    if [ "$NOME_APP" = "Antigravity" ]; then
+        EXECUTAVEL="$DIRETORIO/antigravity"
+    else
+        EXECUTAVEL="$DIRETORIO/antigravity-ide"
+    fi
+    [ -f "$EXECUTAVEL" ] && [ -x "$EXECUTAVEL" ] || return 1
+    SAIDA=$(ELECTRON_RUN_AS_NODE=1 timeout 15 "$EXECUTAVEL" --version 2>"$PASTA_TMP/healthcheck.err") || return 1
+    [ -n "$SAIDA" ] || return 1
+    printf '%s\n' "$SAIDA" | head -n 1
+}
+
+trocar_link_atomico() {
+    local NOME_APP="$1"
+    local DESTINO="$2"
+    local LINK="$DIRETORIO_BASE/$NOME_APP"
+    local TEMPORARIO="$DIRETORIO_BASE/.${NOME_APP}.link-$$-$RANDOM"
+    local RELATIVO RAIZ DESTINO_REAL
+    if [ -e "$LINK" ] && [ ! -L "$LINK" ]; then
+        echo "O caminho ativo não é um link simbólico gerenciado: $LINK" >&2
+        return 1
+    fi
+    RAIZ=$(realpath -m "$(pasta_versoes "$NOME_APP")")
+    DESTINO_REAL=$(realpath -e "$DESTINO") || return 1
+    case "$DESTINO_REAL/" in
+        "$RAIZ"/*/) ;;
+        *) return 1 ;;
+    esac
+    RELATIVO=$(realpath --relative-to="$DIRETORIO_BASE" "$DESTINO_REAL") || return 1
+    ln -s -- "$RELATIVO" "$TEMPORARIO" || return 1
+    if ! mv -Tf -- "$TEMPORARIO" "$LINK"; then
+        rm -f -- "$TEMPORARIO"
+        return 1
+    fi
+}
+
+ativar_versao_atomica() {
+    local NOME_APP="$1"
+    local DESTINO
+    DESTINO=$(realpath -e "$2") || return 1
+    local ANTERIOR="" ANTERIOR_ESTADO="" RUNTIME
+    ANTERIOR=$(versao_ativa "$NOME_APP" 2>/dev/null || true)
+    ANTERIOR_ESTADO=$(ler_estado_valor "$NOME_APP" previous 2>/dev/null || true)
+    RUNTIME=$(testar_saude_versao "$NOME_APP" "$DESTINO") || return 1
+    trocar_link_atomico "$NOME_APP" "$DESTINO" || return 1
+
+    if ! testar_saude_versao "$NOME_APP" "$DIRETORIO_BASE/$NOME_APP" >/dev/null; then
+        if [ -n "$ANTERIOR" ]; then
+            trocar_link_atomico "$NOME_APP" "$ANTERIOR" || true
+        else
+            rm -f -- "$DIRETORIO_BASE/$NOME_APP"
+        fi
+        return 1
+    fi
+    if [ "$ANTERIOR" = "$DESTINO" ]; then
+        ANTERIOR="$ANTERIOR_ESTADO"
+    fi
+    if ! gravar_estado "$NOME_APP" "$DESTINO" "$ANTERIOR"; then
+        if [ -n "$ANTERIOR" ]; then
+            trocar_link_atomico "$NOME_APP" "$ANTERIOR" || true
+        else
+            rm -f -- "$DIRETORIO_BASE/$NOME_APP"
+        fi
+        return 1
+    fi
+    printf '%s\n' "$RUNTIME"
+}
+
+listar_diretorios_versao() {
+    local NOME_APP="$1"
+    local RAIZ
+    RAIZ=$(pasta_versoes "$NOME_APP")
+    [ -d "$RAIZ" ] || return 0
+    find "$RAIZ" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -printf '%T@ %p\n' |
+        sort -rn | cut -d' ' -f2-
+}
+
+exibir_estado_aplicativo() {
+    local NOME_APP="$1"
+    local DETALHADO="${2:-0}"
+    local ATIVA="" DIRETORIO VERSAO MARCADOR
+    ATIVA=$(versao_ativa "$NOME_APP" 2>/dev/null || true)
+    if [ "$DETALHADO" -eq 0 ]; then
+        if [ -n "$ATIVA" ]; then
+            printf '%s: %s\n' "$NOME_APP" "$(versao_diretorio "$ATIVA")"
+        else
+            printf '%s: não instalada\n' "$NOME_APP"
+        fi
+        return
+    fi
+    printf '\n%s:\n' "$NOME_APP"
+    if [ -z "$(listar_diretorios_versao "$NOME_APP")" ]; then
+        printf '  Nenhuma versão instalada.\n'
+        return
+    fi
+    while IFS= read -r DIRETORIO; do
+        [ -n "$DIRETORIO" ] || continue
+        VERSAO=$(versao_diretorio "$DIRETORIO")
+        MARCADOR=" "
+        [ "$DIRETORIO" = "$ATIVA" ] && MARCADOR="*"
+        printf '  %s %s  (%s)\n' "$MARCADOR" "$VERSAO" "$(date -r "$DIRETORIO" '+%d/%m/%Y %H:%M:%S')"
+    done < <(listar_diretorios_versao "$NOME_APP")
+}
+
+resolver_versao() {
+    local NOME_APP="$1"
+    local VERSAO_ALVO="$2"
+    local DIRETORIO
+    while IFS= read -r DIRETORIO; do
+        [ "$(versao_diretorio "$DIRETORIO")" = "$VERSAO_ALVO" ] && {
+            printf '%s\n' "$DIRETORIO"
+            return 0
+        }
+    done < <(listar_diretorios_versao "$NOME_APP")
+    return 1
+}
+
+rollback_aplicativo() {
+    local NOME_APP="$1"
+    local VERSAO_ALVO="${2:-}"
+    local ATIVA DESTINO="" DIRETORIO RUNTIME
+    ATIVA=$(versao_ativa "$NOME_APP" 2>/dev/null || true)
+    if [ -n "$VERSAO_ALVO" ]; then
+        DESTINO=$(resolver_versao "$NOME_APP" "$VERSAO_ALVO") || return 1
+    else
+        DESTINO=$(ler_estado_valor "$NOME_APP" previous 2>/dev/null || true)
+        if [ -z "$DESTINO" ] || [ "$DESTINO" = "$ATIVA" ]; then
+            while IFS= read -r DIRETORIO; do
+                if [ "$DIRETORIO" != "$ATIVA" ]; then
+                    DESTINO="$DIRETORIO"
+                    break
+                fi
+            done < <(listar_diretorios_versao "$NOME_APP")
+        fi
+    fi
+    [ -n "$DESTINO" ] && [ "$DESTINO" != "$ATIVA" ] || return 1
+    RUNTIME=$(ativar_versao_atomica "$NOME_APP" "$DESTINO") || return 1
+    printf '%s|%s\n' "$(versao_diretorio "$DESTINO")" "$RUNTIME"
+}
+
+podar_versoes() {
+    local NOME_APP="$1"
+    local MANTER="$2"
+    [ "$MANTER" -ge 1 ] || return 1
+    local ATIVA ANTERIOR DIRETORIO CONTAGEM=0
+    declare -A PROTEGIDAS=()
+    ATIVA=$(versao_ativa "$NOME_APP" 2>/dev/null || true)
+    ANTERIOR=$(ler_estado_valor "$NOME_APP" previous 2>/dev/null || true)
+    [ -n "$ATIVA" ] && PROTEGIDAS["$ATIVA"]=1
+    [ -n "$ANTERIOR" ] && PROTEGIDAS["$ANTERIOR"]=1
+    CONTAGEM=${#PROTEGIDAS[@]}
+    while IFS= read -r DIRETORIO; do
+        [ -n "$DIRETORIO" ] || continue
+        if [ "$CONTAGEM" -lt "$MANTER" ] && [ -z "${PROTEGIDAS[$DIRETORIO]:-}" ]; then
+            PROTEGIDAS["$DIRETORIO"]=1
+            CONTAGEM=$((CONTAGEM + 1))
+        fi
+    done < <(listar_diretorios_versao "$NOME_APP")
+    while IFS= read -r DIRETORIO; do
+        [ -n "$DIRETORIO" ] || continue
+        if [ -z "${PROTEGIDAS[$DIRETORIO]:-}" ]; then
+            printf '%s\n' "$(versao_diretorio "$DIRETORIO")"
+            rm -rf -- "$DIRETORIO"
+        fi
+    done < <(listar_diretorios_versao "$NOME_APP")
+}
 
 # Função para spinner em segundo plano
 iniciar_spinner() {
@@ -44,7 +343,7 @@ iniciar_spinner() {
     (
         local chars="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         while true; do
-            for ((i=0; i<${#chars}; i++)); do
+            for ((i = 0; i < ${#chars}; i++)); do
                 echo -ne "\r${CLR_CYAN}${chars:$i:1} $MSG...${CLR_RESET}"
                 sleep 0.08
             done
@@ -58,6 +357,7 @@ parar_spinner() {
     local MSG="$2"
     kill "$SPINNER_PID" 2>/dev/null
     wait "$SPINNER_PID" 2>/dev/null
+    SPINNER_PID=""
     echo -ne "\r\033[2K"
     if [ "$SUCESSO" = "0" ]; then
         echo -e "${CLR_GREEN}✓ $MSG${CLR_RESET}"
@@ -138,7 +438,7 @@ exibir_notas_versao() {
                 G) echo -e "  ${CLR_CYAN}${TEXTO}:${CLR_RESET}" ;;
                 I) echo -e "    ${CLR_WHITE}• ${TEXTO}${CLR_RESET}" ;;
             esac
-        done <<< "$NOTAS"
+        done <<<"$NOTAS"
     else
         echo -e "  ${CLR_WARNING}⚠ Não foram encontradas notas específicas para esta versão.${CLR_RESET}"
     fi
@@ -207,13 +507,13 @@ exibir_diagnosticos() {
 
     # Configuração de largura
     local LARGURA_TOTAL=78
-    
+
     local LINHA_BORDAS=$(printf '═%.0s' {1..78})
     echo -e "\n${CLR_HEADER}╔${LINHA_BORDAS}╗${CLR_RESET}"
-    
+
     local TITULO="DIAGNÓSTICOS DO SISTEMA"
-    local ESPACO_TITULO=$(( (LARGURA_TOTAL - ${#TITULO}) / 2 ))
-    local REM_TITULO=$(( LARGURA_TOTAL - ${#TITULO} - ESPACO_TITULO ))
+    local ESPACO_TITULO=$(((LARGURA_TOTAL - ${#TITULO}) / 2))
+    local REM_TITULO=$((LARGURA_TOTAL - ${#TITULO} - ESPACO_TITULO))
     local PADDING_ESQ=$(printf ' %.0s' $(seq 1 $ESPACO_TITULO))
     local PADDING_DIR=$(printf ' %.0s' $(seq 1 $REM_TITULO))
     echo -e "${CLR_HEADER}║${CLR_RESET}${PADDING_ESQ}${TITULO}${PADDING_DIR}${CLR_HEADER}║${CLR_RESET}"
@@ -226,20 +526,20 @@ exibir_diagnosticos() {
 
         local LABEL_STR=" ${LABEL}:"
         local COL1_LEN=24
-        
-        local MAX_VAL_LEN=$(( LARGURA_TOTAL - COL1_LEN - 2 ))
+
+        local MAX_VAL_LEN=$((LARGURA_TOTAL - COL1_LEN - 2))
         if [ ${#VALOR} -gt $MAX_VAL_LEN ]; then
-            VALOR="${VALOR:0:$((MAX_VAL_LEN-3))}..."
+            VALOR="${VALOR:0:$((MAX_VAL_LEN - 3))}..."
         fi
 
-        local ESPACOS_RESTANTES=$(( LARGURA_TOTAL - COL1_LEN - ${#VALOR} ))
-        
-        local ESPACOS_COL1=$(( COL1_LEN - ${#LABEL_STR} ))
+        local ESPACOS_RESTANTES=$((LARGURA_TOTAL - COL1_LEN - ${#VALOR}))
+
+        local ESPACOS_COL1=$((COL1_LEN - ${#LABEL_STR}))
         local PADDING_COL1=""
         if [ $ESPACOS_COL1 -gt 0 ]; then
             PADDING_COL1=$(printf ' %.0s' $(seq 1 $ESPACOS_COL1))
         fi
-        
+
         local PADDING_RESTANTE=""
         if [ $ESPACOS_RESTANTES -gt 0 ]; then
             PADDING_RESTANTE=$(printf ' %.0s' $(seq 1 $ESPACOS_RESTANTES))
@@ -261,11 +561,11 @@ exibir_diagnosticos() {
 menu_selecao() {
     local LARGURA_TOTAL=78
     local LINHA_BORDAS=$(printf '═%.0s' {1..78})
-    
+
     echo -e "${CLR_HEADER}╔${LINHA_BORDAS}╗${CLR_RESET}"
     local TITULO="MENU DE OPÇÕES DE ATUALIZAÇÃO"
-    local ESPACO_TITULO=$(( (LARGURA_TOTAL - ${#TITULO}) / 2 ))
-    local REM_TITULO=$(( LARGURA_TOTAL - ${#TITULO} - ESPACO_TITULO ))
+    local ESPACO_TITULO=$(((LARGURA_TOTAL - ${#TITULO}) / 2))
+    local REM_TITULO=$((LARGURA_TOTAL - ${#TITULO} - ESPACO_TITULO))
     local PADDING_ESQ=$(printf ' %.0s' $(seq 1 $ESPACO_TITULO))
     local PADDING_DIR=$(printf ' %.0s' $(seq 1 $REM_TITULO))
     echo -e "${CLR_HEADER}║${CLR_RESET}${PADDING_ESQ}${TITULO}${PADDING_DIR}${CLR_HEADER}║${CLR_RESET}"
@@ -274,8 +574,7 @@ menu_selecao() {
     print_opcao() {
         local NUM="$1"
         local DESC="$2"
-        # Sem cores isso tem largura: 2 (espaço) + 3 ("[%d]" % num) + 1 (espaço) + len(desc) = 6 + len(desc)
-        local ESPACOS=$(( LARGURA_TOTAL - 6 - ${#DESC} ))
+        local ESPACOS=$((LARGURA_TOTAL - 5 - ${#NUM} - ${#DESC}))
         local PADDING_RESTANTE=$(printf ' %.0s' $(seq 1 $ESPACOS))
         echo -e "${CLR_HEADER}║${CLR_RESET}  ${CLR_CYAN}[${NUM}]${CLR_WHITE} ${DESC}${CLR_RESET}${PADDING_RESTANTE}${CLR_HEADER}║${CLR_RESET}"
     }
@@ -286,17 +585,21 @@ menu_selecao() {
     print_opcao 4 "Forçar Reinstalação de Ambos (Mesmo na mesma versão)"
     print_opcao 5 "Consultar Changelog Oficial (com tradução)"
     print_opcao 6 "Sair"
+    print_opcao 7 "Mostrar Versões Ativas"
+    print_opcao 8 "Listar Histórico de Versões"
+    print_opcao 9 "Rollback de Ambos para a Versão Anterior"
+    print_opcao 10 "Limpar Histórico Antigo (Manter 2)"
     echo -e "${CLR_HEADER}╚${LINHA_BORDAS}╝${CLR_RESET}"
 
     while true; do
-        read -p "Digite sua escolha (1-6): " ESCOLHA
+        read -r -p "Digite sua escolha (1-10): " ESCOLHA
         case "$ESCOLHA" in
-            1|2|3|4|5|6)
+            1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10)
                 OPCAO_SELECIONADA="$ESCOLHA"
                 return
                 ;;
             *)
-                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 6.${CLR_RESET}"
+                echo -e "${CLR_FAIL}Opção inválida! Escolha um número de 1 a 10.${CLR_RESET}"
                 ;;
         esac
     done
@@ -305,22 +608,22 @@ menu_selecao() {
 # Cria atalho no Desktop do usuário
 criar_atalho() {
     local NOME_APP="$1"
-    
+
     local DESKTOP_DIR
     if [ -n "$SUDO_USER" ]; then
         DESKTOP_DIR=$(sudo -u "$SUDO_USER" xdg-user-dir DESKTOP 2>/dev/null || echo "/home/$SUDO_USER/Desktop")
     else
         DESKTOP_DIR=$(xdg-user-dir DESKTOP 2>/dev/null || echo "$HOME/Desktop")
     fi
-    
+
     if [ ! -d "$DESKTOP_DIR" ]; then
         return 1
     fi
-    
+
     local SHORTCUT_PATH="$DESKTOP_DIR/${NOME_APP}.desktop"
     local EXEC_PATH
     local ICON_PATH
-    
+
     local FALLBACK_ICON
     if [ "$NOME_APP" = "Antigravity" ]; then
         EXEC_PATH="$DIRETORIO_BASE/Antigravity/antigravity"
@@ -331,10 +634,10 @@ criar_atalho() {
         ICON_PATH="$DIRETORIO_BASE/Antigravity_IDE/antigravity-logo.png"
         FALLBACK_ICON="$DIRETORIO_BASE/Antigravity_IDE/resources/app/out/media/code-icon.svg"
     fi
-    
+
     if [ ! -f "$ICON_PATH" ]; then
         # Baixa a imagem oficial do logo
-        curl -sL "https://antigravity.google/assets/image/antigravity-logo.png" -o "$ICON_PATH"
+        curl_seguro --silent "https://antigravity.google/assets/image/antigravity-logo.png" -o "$ICON_PATH"
         if [ $? -ne 0 ] || [ ! -s "$ICON_PATH" ]; then
             if [ -f "$FALLBACK_ICON" ]; then
                 ICON_PATH="$FALLBACK_ICON"
@@ -343,10 +646,10 @@ criar_atalho() {
             fi
         fi
     fi
-    
+
     iniciar_spinner "Criando atalho de desktop para $NOME_APP"
-    
-    cat <<EOF > "$SHORTCUT_PATH"
+
+    cat <<EOF >"$SHORTCUT_PATH"
 [Desktop Entry]
 Version=1.0
 Type=Application
@@ -357,12 +660,12 @@ Icon=$ICON_PATH
 Terminal=false
 Categories=Development;
 EOF
-    
+
     chmod +x "$SHORTCUT_PATH"
     if [ -n "$SUDO_USER" ]; then
         chown "$SUDO_USER:$SUDO_USER" "$SHORTCUT_PATH" 2>/dev/null
     fi
-    
+
     if [ $? -eq 0 ]; then
         parar_spinner 0 "Atalho de desktop criado para $NOME_APP"
     else
@@ -379,13 +682,18 @@ atualizar_aplicativo() {
 
     echo -e "\n${CLR_BLUE}⚡ Analisando: $NOME_APP ($PADRAO_URL) ${CLR_RESET}"
     echo -e "  ${CLR_GRAY}----------------------------------------${CLR_RESET}"
-    
+
     # 1. Extrai a URL exata
     URL_DOWNLOAD=$(grep -oE 'https://[^"]+\.tar\.gz' "$PAGINA_HTML" | grep "$PADRAO_URL" | grep "$ARCH_ALVO" | head -n 1)
     URL_DOWNLOAD=$(echo "$URL_DOWNLOAD" | sed 's/\\//g')
 
     if [ -z "$URL_DOWNLOAD" ]; then
         echo -e "  ${CLR_WARNING}⚠ Link de download não disponível para $NOME_APP ($ARCH_ALVO).${CLR_RESET}"
+        return 1
+    fi
+
+    if ! validar_url_download "$URL_DOWNLOAD"; then
+        echo -e "  ${CLR_FAIL}URL de download rejeitada por não ser HTTPS ou .tar.gz.${CLR_RESET}"
         return 1
     fi
 
@@ -398,7 +706,7 @@ atualizar_aplicativo() {
     fi
 
     # Obter data/hora do arquivo no servidor remoto via HTTP HEAD
-    LAST_MOD=$(curl -sI -A "Mozilla/5.0" "$URL_DOWNLOAD" | grep -i "^last-modified:" | cut -d':' -f2- | xargs 2>/dev/null)
+    LAST_MOD=$(curl_seguro --silent --head -A "Mozilla/5.0" "$URL_DOWNLOAD" 2>/dev/null | grep -i "^last-modified:" | cut -d':' -f2- | xargs 2>/dev/null)
     STR_DATA_WEB=""
     if [ -n "$LAST_MOD" ]; then
         DATA_SERVIDOR_FMT=$(date -d "$LAST_MOD" +"%d/%m/%Y %H:%M:%S" 2>/dev/null || echo "$LAST_MOD")
@@ -409,7 +717,7 @@ atualizar_aplicativo() {
     PASTA_APP="$DIRETORIO_BASE/$NOME_APP"
     ARQUIVO_VERSAO_LOCAL="$PASTA_APP/version.txt"
     STR_DATA_LOCAL=""
-    
+
     if [ -f "$ARQUIVO_VERSAO_LOCAL" ]; then
         VERSAO_LOCAL=$(cat "$ARQUIVO_VERSAO_LOCAL")
         DATA_LOCAL_FMT=$(date -r "$ARQUIVO_VERSAO_LOCAL" +"%d/%m/%Y %H:%M:%S" 2>/dev/null)
@@ -431,46 +739,91 @@ atualizar_aplicativo() {
         else
             echo -e "  ${CLR_WARNING}➜ Nova versão disponível! Inicializando download...${CLR_RESET}"
         fi
-        
-        ARQUIVO_TAR="$PASTA_TMP/$NOME_APP.tar.gz"
-        echo -e "  ${CLR_BLUE}Baixando $NOME_APP...${CLR_RESET}"
-        curl -L --progress-bar "$URL_DOWNLOAD" -o "$ARQUIVO_TAR"
 
-        if [ $? -ne 0 ] || [ ! -s "$ARQUIVO_TAR" ]; then
+        ARQUIVO_TAR="$PASTA_TMP/$NOME_APP.tar.gz"
+        ARQUIVO_PARCIAL="${ARQUIVO_TAR}.part"
+        CHECKSUM_ESPERADO=$(curl_seguro --silent "${URL_DOWNLOAD}.sha256" 2>/dev/null | grep -ioE '(^|[^0-9a-f])[0-9a-f]{64}([^0-9a-f]|$)' | grep -ioE '[0-9a-f]{64}' | head -n 1 || true)
+        if [ -n "$CHECKSUM_ESPERADO" ]; then
+            echo -e "  ${CLR_BLUE}SHA-256 oficial encontrado; o pacote será verificado.${CLR_RESET}"
+        else
+            echo -e "  ${CLR_WARNING}Checksum oficial não publicado; o SHA-256 local será registrado.${CLR_RESET}"
+        fi
+        echo -e "  ${CLR_BLUE}Baixando $NOME_APP...${CLR_RESET}"
+        rm -f -- "$ARQUIVO_PARCIAL"
+        curl_seguro --progress-bar --max-filesize "$MAX_DOWNLOAD_BYTES" "$URL_DOWNLOAD" -o "$ARQUIVO_PARCIAL"
+
+        if [ $? -ne 0 ] || [ ! -s "$ARQUIVO_PARCIAL" ]; then
+            rm -f -- "$ARQUIVO_PARCIAL"
             echo -e "  ${CLR_FAIL}Erro: Falha ao baixar o arquivo de $NOME_APP.${CLR_RESET}"
             return 1
         fi
 
-        # Cria pasta específica da versão
-        PASTA_NOVA_VERSAO="$DIRETORIO_BASE/${NOME_APP}_VERSOES/${NOME_APP}-$VERSAO_WEB"
-        mkdir -p "$PASTA_NOVA_VERSAO"
+        TAMANHO_DOWNLOAD=$(stat -c %s "$ARQUIVO_PARCIAL" 2>/dev/null || echo 0)
+        if [ "$TAMANHO_DOWNLOAD" -gt "$MAX_DOWNLOAD_BYTES" ]; then
+            rm -f -- "$ARQUIVO_PARCIAL"
+            echo -e "  ${CLR_FAIL}Erro: O pacote excede o limite máximo permitido.${CLR_RESET}"
+            return 1
+        fi
+        SHA256_LOCAL=$(sha256sum "$ARQUIVO_PARCIAL" | awk '{print $1}')
+        if [ -n "$CHECKSUM_ESPERADO" ] && [ "${SHA256_LOCAL,,}" != "${CHECKSUM_ESPERADO,,}" ]; then
+            rm -f -- "$ARQUIVO_PARCIAL"
+            echo -e "  ${CLR_FAIL}Erro: O SHA-256 não corresponde ao checksum publicado.${CLR_RESET}"
+            return 1
+        fi
+        mv -f -- "$ARQUIVO_PARCIAL" "$ARQUIVO_TAR"
+
+        # Extrai em staging privado e somente publica uma instalação validada.
+        PASTA_VERSOES="$DIRETORIO_BASE/${NOME_APP}_VERSOES"
+        PASTA_NOVA_VERSAO="$PASTA_VERSOES/${NOME_APP}-$VERSAO_WEB"
+        mkdir -p "$PASTA_VERSOES"
+        if [ -e "$PASTA_NOVA_VERSAO" ] || [ -L "$PASTA_NOVA_VERSAO" ]; then
+            PASTA_NOVA_VERSAO="${PASTA_NOVA_VERSAO}-reinstall-$(date +%s%N)"
+        fi
+        STAGING=$(mktemp -d "$PASTA_VERSOES/.${NOME_APP}-${VERSAO_WEB}.XXXXXXXX") || return 1
 
         iniciar_spinner "Extraindo arquivos para ${NOME_APP}-$VERSAO_WEB"
-        tar -xf "$ARQUIVO_TAR" -C "$PASTA_NOVA_VERSAO" --strip-components=1
-        if [ $? -eq 0 ]; then
-            parar_spinner 0 "Extraído com sucesso para: ${NOME_APP}-$VERSAO_WEB"
-        else
+        if ! validar_pacote_tar "$ARQUIVO_TAR" || ! (umask 022 && tar -xzf "$ARQUIVO_TAR" -C "$STAGING" \
+            --strip-components=1 --no-same-owner --no-same-permissions --delay-directory-restore); then
             parar_spinner 1 "Falha ao extrair $NOME_APP"
-            rm -rf "$PASTA_NOVA_VERSAO"
+            rm -rf -- "$STAGING"
             return 1
         fi
 
-        # Escreve a nova versão local
-        echo "$VERSAO_WEB" > "$PASTA_NOVA_VERSAO/version.txt"
-
-        # Atualiza o Link Simbólico principal (usando caminho relativo para evitar problemas de montagem/codificação)
-        iniciar_spinner "Atualizando link simbólico do sistema"
-        rm -rf "$PASTA_APP"
-        
-        # O link simbólico deve ser relativo à pasta onde está contido (DIRETORIO_BASE)
-        local RELATIVE_TARGET="${NOME_APP}_VERSOES/${NOME_APP}-$VERSAO_WEB"
-        ln -s "$RELATIVE_TARGET" "$PASTA_APP"
-        if [ $? -eq 0 ]; then
-            parar_spinner 0 "Link simbólico atualizado: $NOME_APP -> $RELATIVE_TARGET"
+        if [ "$NOME_APP" = "Antigravity" ]; then
+            EXECUTAVEL_ESPERADO="$STAGING/antigravity"
         else
-            parar_spinner 1 "Erro ao criar link simbólico"
+            EXECUTAVEL_ESPERADO="$STAGING/antigravity-ide"
+        fi
+        if [ ! -f "$EXECUTAVEL_ESPERADO" ] || [ ! -x "$EXECUTAVEL_ESPERADO" ]; then
+            parar_spinner 1 "Pacote inválido: executável esperado ausente ou sem permissão"
+            rm -rf -- "$STAGING"
             return 1
         fi
+        chmod 755 "$STAGING"
+        find "$STAGING" -xdev -perm /6000 -exec chmod a-s {} +
+
+        echo "$VERSAO_WEB" >"$STAGING/version.txt"
+        CHECKSUM_VERIFICADO=false
+        [ -n "$CHECKSUM_ESPERADO" ] && CHECKSUM_VERIFICADO=true
+        DATA_INSTALACAO=$(date --iso-8601=seconds)
+        printf '{\n  "app": "%s",\n  "version": "%s",\n  "source_url": "%s",\n  "sha256": "%s",\n  "checksum_verified": %s,\n  "installed_at": "%s"\n}\n' \
+            "$NOME_APP" "$VERSAO_WEB" "$URL_DOWNLOAD" "$SHA256_LOCAL" "$CHECKSUM_VERIFICADO" "$DATA_INSTALACAO" \
+            >"$STAGING/.install-manifest.json"
+
+        if ! mv -- "$STAGING" "$PASTA_NOVA_VERSAO"; then
+            parar_spinner 1 "Falha ao publicar a versão validada"
+            return 1
+        fi
+        parar_spinner 0 "Extraído e validado com sucesso: ${NOME_APP}-$VERSAO_WEB"
+
+        iniciar_spinner "Testando e ativando a nova versão atomicamente"
+        local RUNTIME
+        RUNTIME=$(ativar_versao_atomica "$NOME_APP" "$PASTA_NOVA_VERSAO")
+        if [ $? -ne 0 ]; then
+            parar_spinner 1 "Falha ao ativar $NOME_APP; versão anterior preservada"
+            return 1
+        fi
+        parar_spinner 0 "Versão ativada e saudável ($RUNTIME)"
 
         criar_atalho "$NOME_APP"
         echo -e "  ${CLR_GREEN}✓ $NOME_APP atualizado com sucesso!${CLR_RESET}"
@@ -488,6 +841,78 @@ exibir_diagnosticos
 # Determina a opção e flags a partir de argumentos de linha de comando para automações
 OPCAO_SELECIONADA=""
 FORCAR_REINSTALACAO=0
+COMANDO_GERENCIAMENTO=""
+
+for arg in "$@"; do
+    ARG_CLEAN=$(echo "$arg" | tr '[:upper:]' '[:lower:]' | sed 's/^-*//')
+    case "$ARG_CLEAN" in
+        current | list | rollback | prune)
+            COMANDO_GERENCIAMENTO="$ARG_CLEAN"
+            break
+            ;;
+    esac
+done
+
+if [ -n "$COMANDO_GERENCIAMENTO" ]; then
+    SELECIONA_HUB=0
+    SELECIONA_IDE=0
+    PARAMETRO=""
+    PROXIMO_E_PARAMETRO=0
+    for arg in "$@"; do
+        ARG_CLEAN=$(echo "$arg" | tr '[:upper:]' '[:lower:]' | sed 's/^-*//')
+        case "$ARG_CLEAN" in
+            hub | antigravity) SELECIONA_HUB=1 ;;
+            ide | antigravity-ide) SELECIONA_IDE=1 ;;
+            "$COMANDO_GERENCIAMENTO") PROXIMO_E_PARAMETRO=1 ;;
+            *)
+                if [ "$PROXIMO_E_PARAMETRO" -eq 1 ]; then
+                    PARAMETRO="$ARG_CLEAN"
+                    PROXIMO_E_PARAMETRO=0
+                fi
+                ;;
+        esac
+    done
+    if [ "$SELECIONA_HUB" -eq 0 ] && [ "$SELECIONA_IDE" -eq 0 ]; then
+        SELECIONA_HUB=1
+        SELECIONA_IDE=1
+    fi
+    if [ "$COMANDO_GERENCIAMENTO" = "rollback" ] && [ -n "$PARAMETRO" ] &&
+        [ "$SELECIONA_HUB" -eq 1 ] && [ "$SELECIONA_IDE" -eq 1 ]; then
+        echo -e "${CLR_FAIL}Informe hub ou ide ao solicitar uma versão específica.${CLR_RESET}"
+        exit 1
+    fi
+
+    STATUS_GERENCIAMENTO=0
+    for NOME_GERENCIADO in $([ "$SELECIONA_HUB" -eq 1 ] && printf 'Antigravity ') $([ "$SELECIONA_IDE" -eq 1 ] && printf 'Antigravity_IDE'); do
+        case "$COMANDO_GERENCIAMENTO" in
+            current) exibir_estado_aplicativo "$NOME_GERENCIADO" ;;
+            list) exibir_estado_aplicativo "$NOME_GERENCIADO" 1 ;;
+            rollback)
+                RESULTADO_ROLLBACK=$(rollback_aplicativo "$NOME_GERENCIADO" "$PARAMETRO") || {
+                    echo -e "${CLR_FAIL}Falha ao reverter $NOME_GERENCIADO.${CLR_RESET}"
+                    STATUS_GERENCIAMENTO=1
+                    continue
+                }
+                IFS='|' read -r VERSAO_ROLLBACK RUNTIME_ROLLBACK <<<"$RESULTADO_ROLLBACK"
+                echo -e "${CLR_GREEN}✓ $NOME_GERENCIADO revertido para $VERSAO_ROLLBACK ($RUNTIME_ROLLBACK).${CLR_RESET}"
+                ;;
+            prune)
+                MANTER="${PARAMETRO:-2}"
+                if ! [[ "$MANTER" =~ ^[0-9]+$ ]] || [ "$MANTER" -lt 1 ]; then
+                    echo -e "${CLR_FAIL}A retenção precisa ser um número maior ou igual a 1.${CLR_RESET}"
+                    exit 1
+                fi
+                REMOVIDAS=$(podar_versoes "$NOME_GERENCIADO" "$MANTER") || {
+                    STATUS_GERENCIAMENTO=1
+                    continue
+                }
+                [ -n "$REMOVIDAS" ] || REMOVIDAS="nenhuma"
+                echo "$NOME_GERENCIADO: versões removidas: ${REMOVIDAS//$'\n'/, }"
+                ;;
+        esac
+    done
+    exit "$STATUS_GERENCIAMENTO"
+fi
 
 for arg in "$@"; do
     ARG_CLEAN=$(echo "$arg" | tr '[:upper:]' '[:lower:]' | sed 's/^-*//')
@@ -495,23 +920,26 @@ for arg in "$@"; do
         FORCAR_REINSTALACAO=1
     elif [ -z "$OPCAO_SELECIONADA" ]; then
         case "$ARG_CLEAN" in
-            1|both|all)
+            1 | both | all)
                 OPCAO_SELECIONADA="1"
                 ;;
-            2|hub|antigravity)
+            2 | hub | antigravity)
                 OPCAO_SELECIONADA="2"
                 ;;
-            3|ide|antigravity-ide)
+            3 | ide | antigravity-ide)
                 OPCAO_SELECIONADA="3"
                 ;;
-            4|reinstall)
+            4 | reinstall)
                 OPCAO_SELECIONADA="4"
                 ;;
-            5|changelog|changes|release-notes)
+            5 | changelog | changes | release-notes)
                 OPCAO_SELECIONADA="5"
                 ;;
-            6|exit|quit)
+            6 | exit | quit)
                 OPCAO_SELECIONADA="6"
+                ;;
+            7 | 8 | 9 | 10)
+                OPCAO_SELECIONADA="$ARG_CLEAN"
                 ;;
         esac
     fi
@@ -530,10 +958,38 @@ elif [ "$OPCAO_SELECIONADA" = "6" ]; then
     exit 0
 fi
 
+if [[ "$OPCAO_SELECIONADA" =~ ^(7|8|9|10)$ ]]; then
+    STATUS_GERENCIAMENTO=0
+    for NOME_GERENCIADO in Antigravity Antigravity_IDE; do
+        case "$OPCAO_SELECIONADA" in
+            7) exibir_estado_aplicativo "$NOME_GERENCIADO" ;;
+            8) exibir_estado_aplicativo "$NOME_GERENCIADO" 1 ;;
+            9)
+                RESULTADO_ROLLBACK=$(rollback_aplicativo "$NOME_GERENCIADO") || {
+                    echo -e "${CLR_FAIL}Falha ao reverter $NOME_GERENCIADO.${CLR_RESET}"
+                    STATUS_GERENCIAMENTO=1
+                    continue
+                }
+                IFS='|' read -r VERSAO_ROLLBACK RUNTIME_ROLLBACK <<<"$RESULTADO_ROLLBACK"
+                echo -e "${CLR_GREEN}✓ $NOME_GERENCIADO revertido para $VERSAO_ROLLBACK ($RUNTIME_ROLLBACK).${CLR_RESET}"
+                ;;
+            10)
+                REMOVIDAS=$(podar_versoes "$NOME_GERENCIADO" 2) || {
+                    STATUS_GERENCIAMENTO=1
+                    continue
+                }
+                [ -n "$REMOVIDAS" ] || REMOVIDAS="nenhuma"
+                echo "$NOME_GERENCIADO: versões removidas: ${REMOVIDAS//$'\n'/, }"
+                ;;
+        esac
+    done
+    exit "$STATUS_GERENCIAMENTO"
+fi
+
 if [ "$OPCAO_SELECIONADA" = "5" ]; then
     iniciar_spinner "Buscando changelog oficial"
     PAGINA_CHANGELOG="$PASTA_TMP/changelog.html"
-    curl -sL --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
+    curl_seguro --silent --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
     if [ ! -s "$PAGINA_CHANGELOG" ]; then
         parar_spinner 1 "Falha ao buscar o changelog oficial"
         echo -e "${CLR_BLUE}Consulte: $(obter_url_changelog "hub")${CLR_RESET}"
@@ -552,7 +1008,7 @@ iniciar_spinner "Buscando versões e mapeando dependências dinâmicas"
 PAGINA_RAW="$PASTA_TMP/download_raw.html"
 PAGINA_HTML="$PASTA_TMP/download.html"
 PAGINA_CHANGELOG="$PASTA_TMP/changelog.html"
-curl -sL --compressed "https://antigravity.google/download" -o "$PAGINA_RAW"
+curl_seguro --silent --compressed "https://antigravity.google/download" -o "$PAGINA_RAW"
 
 if [ ! -s "$PAGINA_RAW" ]; then
     parar_spinner 1 "Falha ao buscar a página de downloads"
@@ -561,19 +1017,19 @@ fi
 
 # Extrai os links de arquivos JavaScript e junta todo o conteúdo em PAGINA_HTML
 JS_FILES=$(grep -oE '(src|href)="[^"]+\.js"' "$PAGINA_RAW" | cut -d'"' -f2)
-cat "$PAGINA_RAW" > "$PAGINA_HTML"
+cat "$PAGINA_RAW" >"$PAGINA_HTML"
 for js in $JS_FILES; do
     if [[ "$js" =~ ^https?:// ]]; then
         js_url="$js"
     else
         js_url="https://antigravity.google/${js#/}"
     fi
-    curl -sL --compressed "$js_url" >> "$PAGINA_HTML" 2>/dev/null
+    curl_seguro --silent --compressed "$js_url" >>"$PAGINA_HTML" 2>/dev/null
 done
 
 # A ausência do changelog não bloqueia a instalação; a função de exibição
 # mantém o link oficial como alternativa.
-curl -sL --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
+curl_seguro --silent --compressed "$URL_CHANGELOG" -o "$PAGINA_CHANGELOG" 2>/dev/null
 
 parar_spinner 0 "Versões, links e changelog carregados com sucesso!"
 
@@ -604,4 +1060,8 @@ if [ $SUCESSO -eq 0 ]; then
     echo -e "\n${CLR_HEADER}=======================================================${CLR_RESET}"
     echo -e "${CLR_GREEN}  Processo concluído com sucesso!                      ${CLR_RESET}"
     echo -e "${CLR_HEADER}=======================================================${CLR_RESET}"
+else
+    echo -e "\n${CLR_FAIL}Processo concluído com falhas.${CLR_RESET}"
 fi
+
+exit "$SUCESSO"

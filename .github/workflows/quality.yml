@@ -1,0 +1,35 @@
+name: Quality
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install Python quality tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Install shell quality tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck shfmt
+      - name: Python syntax and lint
+        run: |
+          python -m compileall -q upgrade.py tests
+          ruff check upgrade.py tests
+          mypy upgrade.py
+      - name: Shell syntax and lint
+        run: |
+          bash -n upgrade.sh
+          shellcheck -S error upgrade.sh
+          shfmt -d -i 4 -ci upgrade.sh
+      - name: Tests
+        run: pytest
+
