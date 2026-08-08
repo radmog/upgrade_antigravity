@@ -321,11 +321,13 @@ def _run_update(
     configured: settings_module.Settings,
     cache: cache_module.TextCache,
     logger,
+    show_diagnostics: bool = True,
 ) -> int:
     if not _begin_mutation(paths, needs_temporary=True):
         return 1
     try:
-        core.exibir_diagnosticos()
+        if show_diagnostics:
+            core.exibir_diagnosticos()
         if not _load_remote_catalog(cache, logger):
             return 1
         results = _process_remote_apps(target, configured, force=force)
@@ -573,7 +575,10 @@ def _run_systemd(namespace: argparse.Namespace, paths: ScopePaths) -> int:
 
 
 def run(namespace: argparse.Namespace) -> int:
+    diagnostics_shown = False
     if namespace.command is None:
+        core.exibir_diagnosticos()
+        diagnostics_shown = True
         namespace = _interactive_request(getattr(namespace, "scope", "system"))
     if namespace.command == "exit":
         print(f"\n{core.CLR_BLUE}Saindo sem realizar alterações.{core.CLR_RESET}\n")
@@ -638,7 +643,17 @@ def run(namespace: argparse.Namespace) -> int:
     if namespace.command == "update":
         if configured.policy == "notify-only":
             return finish(_run_check(namespace.target, configured, cache, logger))
-        return finish(_run_update(namespace.target, namespace.force, paths, configured, cache, logger))
+        return finish(
+            _run_update(
+                namespace.target,
+                namespace.force,
+                paths,
+                configured,
+                cache,
+                logger,
+                show_diagnostics=not diagnostics_shown,
+            )
+        )
     if namespace.command in ("rollback", "prune", "uninstall", "launcher"):
         return finish(_run_mutation(namespace, paths))
     if namespace.command == "systemd":

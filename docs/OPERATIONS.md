@@ -32,7 +32,9 @@ Para abrir o menu no escopo de usuário:
 ./upgrade.py --user
 ```
 
-Sem argumentos, o menu usa o escopo de sistema. A opção **Sair** é sempre a
+Sem argumentos, o diagnóstico de sistema e hardware é exibido antes do menu,
+incluindo sistema operacional, arquitetura, CPU, memória RAM e disco. O menu usa
+o escopo de sistema. A opção **Sair** é sempre a
 última da lista. A desinstalação pelo menu exige a confirmação literal
 `REMOVER`.
 
@@ -101,4 +103,3 @@ estado apontando para fora do catálogo; a ferramenta os recusará.
 
 Os manifestos `.install-manifest.json` registram origem, hash, versão e horário
 de instalação. Logs são JSON Lines, giram em 1 MiB e mantêm três backups.
-

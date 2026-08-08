@@ -71,6 +71,10 @@ sudo ./upgrade.py
 ./upgrade.py --user
 ```
 
+Antes de apresentar o menu, a ferramenta exibe o diagnóstico do sistema com
+sistema operacional, arquitetura, processador, threads da CPU, uso e total de
+memória RAM e espaço disponível e total em disco.
+
 **Opções do menu:**
 
 1. Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)

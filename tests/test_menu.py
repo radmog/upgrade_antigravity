@@ -41,6 +41,21 @@ def test_menu_interativo_preserva_escopo_usuario(monkeypatch):
     assert request.scope == "user"
 
 
+def test_modo_interativo_exibe_diagnostico_antes_do_menu(monkeypatch):
+    events = []
+
+    monkeypatch.setattr(cli.core, "exibir_diagnosticos", lambda: events.append("diagnóstico"))
+
+    def exit_from_menu(scope):
+        events.append(f"menu:{scope}")
+        return argparse.Namespace(command="exit", target="both", scope=scope)
+
+    monkeypatch.setattr(cli, "_interactive_request", exit_from_menu)
+
+    assert cli.run(argparse.Namespace(command=None, scope="user")) == 0
+    assert events == ["diagnóstico", "menu:user"]
+
+
 def test_cli_aceita_escopo_isolado_para_abrir_menu():
     assert cli.parse_args(["--user"]) == argparse.Namespace(command=None, scope="user")
     assert cli.parse_args(["--system"]) == argparse.Namespace(command=None, scope="system")
