@@ -8,6 +8,7 @@
 *.tar.gz
 *.html
 *.js
+!tests/fixtures/*.html
 
 # Python, testes e ferramentas de qualidade
 __pycache__/
