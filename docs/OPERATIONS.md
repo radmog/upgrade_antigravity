@@ -13,7 +13,7 @@ cd upgrade_antigravity
 Também pode ser instalado a partir do wheel:
 
 ```bash
-python3 -m pip install antigravity_updater-1.0.1-py3-none-any.whl
+python3 -m pip install antigravity_updater-1.1.0-py3-none-any.whl
 antigravity-upgrade --version
 ```
 

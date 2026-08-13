@@ -39,3 +39,9 @@ existente até que uma migração seja documentada.
 ## M7 — Consolidação (1.0.0)
 
 - [x] Matriz de compatibilidade, documentação operacional e release estável.
+
+## M8 — Retomada de downloads (1.1.0)
+
+- [x] Persistência privada de pacotes parciais entre execuções.
+- [x] Retomada com HTTP `Range` e reinício seguro quando não suportado.
+- [x] Validação de intervalos, respostas truncadas e integridade antes da publicação.
