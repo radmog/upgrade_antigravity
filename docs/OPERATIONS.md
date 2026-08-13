@@ -82,7 +82,12 @@ processo concorrente.
 ### Falha de rede
 
 Consulte `logs` e `cache status`. Metadados expirados podem sustentar consultas
-quando a rede falha, mas downloads de pacotes nunca usam o cache textual.
+quando a rede falha, mas downloads de pacotes nunca usam o cache textual. Um
+pacote interrompido permanece no subdiretório privado `downloads` do estado do
+escopo (`/var/lib/antigravity-updater` no sistema ou o diretório XDG de estado
+do usuário). A próxima atualização da mesma URL solicita somente os bytes
+restantes; se o servidor não oferecer HTTP `Range`, o download recomeça de modo
+seguro.
 
 ### Falha na ativação
 

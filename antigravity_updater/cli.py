@@ -589,7 +589,7 @@ def run(namespace: argparse.Namespace) -> int:
             print("Desinstalação cancelada.")
             return 0
     paths = resolve_scope(getattr(namespace, "scope", "system"))
-    core.configurar_caminhos(paths.base_dir, paths.lock_file, paths.launcher_dir)
+    core.configurar_caminhos(paths.base_dir, paths.lock_file, paths.launcher_dir, paths.state_dir)
     if namespace.command == "config":
         logger = observability.configure(paths.log_file, "INFO")
         observability.event(logger, "command_started", command="config", scope=paths.scope)

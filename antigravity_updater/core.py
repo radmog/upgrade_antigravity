@@ -3,6 +3,7 @@ import os
 import sys
 import platform
 import atexit
+import errno
 import fcntl
 import hashlib
 import json
@@ -39,6 +40,7 @@ CLR_WHITE = "\033[37m"
 # Diretório base de instalação
 DIRETORIO_BASE = "/opt/antigravity_apps"
 PASTA_TMP = None
+DIRETORIO_DOWNLOADS = None
 ARQUIVO_LOCK = "/run/lock/antigravity-updater.lock"
 DIRETORIO_LAUNCHERS = "/usr/local/share/applications"
 URL_CHANGELOG = "https://antigravity.google/changelog"
@@ -52,12 +54,17 @@ LOCK_HANDLE = None
 LOGGER = logging.getLogger("antigravity_updater")
 
 
-def configurar_caminhos(diretorio_base, arquivo_lock, diretorio_launchers):
+def configurar_caminhos(diretorio_base, arquivo_lock, diretorio_launchers, diretorio_estado=None):
     """Configura o motor para o escopo selecionado pela CLI."""
-    global DIRETORIO_BASE, ARQUIVO_LOCK, DIRETORIO_LAUNCHERS
+    global DIRETORIO_BASE, ARQUIVO_LOCK, DIRETORIO_LAUNCHERS, DIRETORIO_DOWNLOADS
     DIRETORIO_BASE = os.fspath(diretorio_base)
     ARQUIVO_LOCK = os.fspath(arquivo_lock)
     DIRETORIO_LAUNCHERS = os.fspath(diretorio_launchers)
+    DIRETORIO_DOWNLOADS = (
+        os.path.join(os.fspath(diretorio_estado), "downloads")
+        if diretorio_estado is not None
+        else None
+    )
 
 def verificar_privilegios():
     """Interrompe a execução quando o instalador não possui privilégios."""
@@ -471,55 +478,221 @@ def consultar_changelog():
             print(f"  {CLR_BLUE}Changelog oficial: {obter_url_changelog(aba)}{CLR_RESET}")
     return encontrados
 
-# Download com barra de progresso animada
-def download_com_progresso(url, dest_path, app_name, checksum_esperado=None):
+class _DownloadPrecisaReiniciar(Exception):
+    """Indica que o parcial remoto e o local não representam o mesmo arquivo."""
+
+
+class _DownloadInvalido(Exception):
+    """Indica que os bytes baixados não podem ser reutilizados com segurança."""
+
+
+def caminho_download_parcial(url):
+    """Retorna um caminho persistente e privado para retomar uma URL exata."""
+    if DIRETORIO_DOWNLOADS is None:
+        return None
+    if os.path.lexists(DIRETORIO_DOWNLOADS) and os.path.islink(DIRETORIO_DOWNLOADS):
+        raise ValueError(f"Diretório de downloads inseguro: {DIRETORIO_DOWNLOADS}")
+    os.makedirs(DIRETORIO_DOWNLOADS, mode=0o700, exist_ok=True)
+    if not os.path.isdir(DIRETORIO_DOWNLOADS):
+        raise ValueError(f"O caminho de downloads não é um diretório: {DIRETORIO_DOWNLOADS}")
+    os.chmod(DIRETORIO_DOWNLOADS, 0o700)
+    identificador = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    return os.path.join(DIRETORIO_DOWNLOADS, f"{identificador}.part")
+
+
+def _cabecalho(response, nome):
+    headers = response.info() if hasattr(response, "info") else getattr(response, "headers", {})
+    return headers.get(nome) if headers is not None else None
+
+
+def _status_http(response):
+    status = getattr(response, "status", None)
+    if status is None and hasattr(response, "getcode"):
+        status = response.getcode()
+    return status
+
+
+def _content_range(value):
+    if not value:
+        return None
+    match = re.fullmatch(r"bytes\s+(\d+)-(\d+)/(\d+|\*)", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    inicio, fim = int(match.group(1)), int(match.group(2))
+    total = None if match.group(3) == "*" else int(match.group(3))
+    if fim < inicio or (total is not None and fim >= total):
+        return None
+    return inicio, fim, total
+
+
+def _total_range_nao_satisfativel(value):
+    if not value:
+        return None
+    match = re.fullmatch(r"bytes\s+\*/(\d+)", value.strip(), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _tamanho_parcial(caminho):
+    if not os.path.lexists(caminho):
+        return 0
+    info = os.lstat(caminho)
+    if not stat.S_ISREG(info.st_mode):
+        raise _DownloadInvalido("O caminho do download parcial não é um arquivo regular.")
+    return info.st_size
+
+
+def _publicar_download(arquivo_parcial, dest_path, checksum_esperado):
+    tamanho = _tamanho_parcial(arquivo_parcial)
+    if tamanho == 0:
+        raise _DownloadInvalido("O arquivo baixado está vazio.")
+    if tamanho > MAX_DOWNLOAD_BYTES:
+        raise _DownloadInvalido("O pacote excede o limite máximo permitido.")
+    digest = calcular_sha256(arquivo_parcial)
+    if checksum_esperado and digest != checksum_esperado.lower():
+        raise _DownloadInvalido("O SHA-256 do pacote não corresponde ao checksum publicado.")
+
+    try:
+        os.replace(arquivo_parcial, dest_path)
+        return
+    except OSError as erro:
+        if erro.errno != errno.EXDEV:
+            raise
+
+    arquivo_publicacao = f"{dest_path}.publishing"
+    try:
+        shutil.copyfile(arquivo_parcial, arquivo_publicacao)
+        os.replace(arquivo_publicacao, dest_path)
+        os.unlink(arquivo_parcial)
+    finally:
+        if os.path.exists(arquivo_publicacao):
+            os.unlink(arquivo_publicacao)
+
+
+def _mostrar_progresso(app_name, downloaded, total_size):
+    if total_size <= 0:
+        return
+    percent = min(100, int(100 * downloaded / total_size))
+    bar_str = "#" * (percent // 2) + "." * (50 - percent // 2)
+    sys.stdout.write(
+        f"\r  {CLR_BLUE}Baixando {app_name}: [{bar_str}] {percent}% "
+        f"({downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB){CLR_RESET}"
+    )
+    sys.stdout.flush()
+
+
+# Download com barra de progresso animada e retomada HTTP (Range).
+def download_com_progresso(url, dest_path, app_name, checksum_esperado=None, arquivo_parcial=None):
     validar_url_download(url)
-    arquivo_parcial = f"{dest_path}.part"
+    arquivo_parcial = os.fspath(arquivo_parcial or f"{dest_path}.part")
     ultimo_erro = None
     for tentativa in range(1, HTTP_RETRIES + 1):
-        downloaded = 0
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            offset = _tamanho_parcial(arquivo_parcial)
+            if offset > MAX_DOWNLOAD_BYTES:
+                raise _DownloadInvalido("O pacote parcial excede o limite máximo permitido.")
+
+            headers = {"User-Agent": "Mozilla/5.0", "Accept-Encoding": "identity"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
                 url_final = response.geturl() if hasattr(response, "geturl") else url
                 validar_url_download(url_final)
-                total_size = int(response.info().get("Content-Length", 0))
+
+                status = _status_http(response)
+                content_length_value = _cabecalho(response, "Content-Length")
+                content_length = int(content_length_value) if content_length_value is not None else None
+                if content_length is not None and content_length < 0:
+                    raise _DownloadPrecisaReiniciar("Content-Length inválido.")
+
+                content_range_value = _cabecalho(response, "Content-Range")
+                content_range = _content_range(content_range_value)
+                if content_range_value and content_range is None:
+                    raise _DownloadPrecisaReiniciar("Content-Range inválido.")
+                resposta_parcial = status == 206 or (status is None and content_range is not None)
+                if offset and resposta_parcial:
+                    if content_range is None or content_range[0] != offset:
+                        raise _DownloadPrecisaReiniciar("O servidor respondeu com um intervalo incompatível.")
+                    inicio, fim, total_range = content_range
+                    esperado_resposta = fim - inicio + 1
+                    if content_length is not None and content_length != esperado_resposta:
+                        raise _DownloadPrecisaReiniciar("O tamanho do intervalo HTTP é inconsistente.")
+                    total_size = total_range or (offset + esperado_resposta)
+                    modo = "ab"
+                elif offset:
+                    # O servidor ignorou Range: a resposta 200 contém o arquivo inteiro.
+                    offset = 0
+                    esperado_resposta = content_length
+                    total_size = content_length or 0
+                    modo = "wb"
+                elif resposta_parcial:
+                    if content_range is None or content_range[0] != 0:
+                        raise _DownloadPrecisaReiniciar("O servidor iniciou o download em um intervalo inválido.")
+                    inicio, fim, total_range = content_range
+                    esperado_resposta = fim - inicio + 1
+                    if content_length is not None and content_length != esperado_resposta:
+                        raise _DownloadPrecisaReiniciar("O tamanho do intervalo HTTP é inconsistente.")
+                    total_size = total_range or esperado_resposta
+                    modo = "wb"
+                else:
+                    esperado_resposta = content_length
+                    total_size = content_length or 0
+                    modo = "wb"
+
                 if total_size > MAX_DOWNLOAD_BYTES:
-                    raise ValueError("O pacote excede o limite máximo permitido.")
-                with open(arquivo_parcial, "wb") as out_file:
+                    raise _DownloadInvalido("O pacote excede o limite máximo permitido.")
+
+                downloaded = offset
+                recebidos = 0
+                if offset:
+                    print(f"\n  {CLR_BLUE}Retomando {app_name} a partir de {offset/1024/1024:.1f}MB...{CLR_RESET}")
+                with open(arquivo_parcial, modo) as out_file:
                     while True:
                         buffer = response.read(1024 * 64)
                         if not buffer:
                             break
+                        recebidos += len(buffer)
                         downloaded += len(buffer)
                         if downloaded > MAX_DOWNLOAD_BYTES:
-                            raise ValueError("O pacote excede o limite máximo permitido.")
+                            raise _DownloadInvalido("O pacote excede o limite máximo permitido.")
                         out_file.write(buffer)
-                        if total_size > 0:
-                            percent = min(100, int(100 * downloaded / total_size))
-                            bar_str = "#" * (percent // 2) + "." * (50 - percent // 2)
-                            sys.stdout.write(
-                                f"\r  {CLR_BLUE}Baixando {app_name}: [{bar_str}] {percent}% "
-                                f"({downloaded/1024/1024:.1f}MB / {total_size/1024/1024:.1f}MB){CLR_RESET}"
-                            )
-                            sys.stdout.flush()
-            if downloaded == 0:
-                raise ValueError("O arquivo baixado está vazio.")
-            digest = calcular_sha256(arquivo_parcial)
-            if checksum_esperado and digest != checksum_esperado.lower():
-                raise ValueError("O SHA-256 do pacote não corresponde ao checksum publicado.")
-            os.replace(arquivo_parcial, dest_path)
+                        _mostrar_progresso(app_name, downloaded, total_size)
+
+                if esperado_resposta is not None and recebidos != esperado_resposta:
+                    raise OSError(
+                        f"Resposta HTTP incompleta: recebidos {recebidos} de {esperado_resposta} bytes."
+                    )
+                if total_size and downloaded != total_size:
+                    raise OSError(f"Download incompleto: recebidos {downloaded} de {total_size} bytes.")
+
+            _publicar_download(arquivo_parcial, dest_path, checksum_esperado)
             sys.stdout.write("\n")
             return True
         except Exception as erro:
             ultimo_erro = erro
-            if os.path.exists(arquivo_parcial):
+            descartar = isinstance(erro, (_DownloadPrecisaReiniciar, _DownloadInvalido, ValueError))
+            if isinstance(erro, urllib.error.HTTPError) and erro.code == 416:
+                headers_erro = erro.headers or {}
+                total_remoto = _total_range_nao_satisfativel(headers_erro.get("Content-Range"))
+                try:
+                    if total_remoto and _tamanho_parcial(arquivo_parcial) == total_remoto:
+                        _publicar_download(arquivo_parcial, dest_path, checksum_esperado)
+                        sys.stdout.write("\n")
+                        return True
+                except _DownloadInvalido as erro_validacao:
+                    ultimo_erro = erro_validacao
+                descartar = True
+            if descartar and os.path.lexists(arquivo_parcial):
+                os.unlink(arquivo_parcial)
+            elif os.path.isfile(arquivo_parcial) and os.path.getsize(arquivo_parcial) == 0:
                 os.unlink(arquivo_parcial)
             if tentativa < HTTP_RETRIES:
                 print(f"\n  {CLR_WARNING}Tentativa {tentativa} falhou; tentando novamente...{CLR_RESET}")
                 time.sleep(tentativa)
     sys.stdout.write("\n")
     print(f"  {CLR_FAIL}Erro ao fazer o download após {HTTP_RETRIES} tentativas: {ultimo_erro}{CLR_RESET}")
+    if os.path.isfile(arquivo_parcial):
+        print(f"  {CLR_BLUE}O download parcial foi preservado para retomada.{CLR_RESET}")
     return False
 
 def _dados_launcher(nome_app):
@@ -1104,7 +1277,14 @@ def atualizar_aplicativo(
             print(f"  {CLR_WARNING}Checksum oficial não publicado; o SHA-256 local será registrado.{CLR_RESET}")
 
         # Download do arquivo com progresso e publicação somente após validação.
-        if not download_com_progresso(url_download, arquivo_tar, nome_app, checksum_esperado):
+        arquivo_parcial = caminho_download_parcial(url_download)
+        if not download_com_progresso(
+            url_download,
+            arquivo_tar,
+            nome_app,
+            checksum_esperado,
+            arquivo_parcial=arquivo_parcial,
+        ):
             return False
 
         if not os.path.exists(arquivo_tar) or os.path.getsize(arquivo_tar) == 0:

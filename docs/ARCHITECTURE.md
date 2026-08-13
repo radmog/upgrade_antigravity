@@ -92,8 +92,11 @@ compatibilidade e operação.
 
 1. O processo obtém lock exclusivo e cria uma sessão temporária com modo `0700`.
 2. Metadados são buscados com timeout e retries.
-3. O pacote é escrito como `.part`, limitado em tamanho e publicado apenas após
-   o download completo e a verificação SHA-256, quando disponível.
+3. O pacote é escrito como `.part` no diretório de estado privado. Respostas
+   truncadas preservam o parcial e a próxima tentativa ou execução continua com
+   HTTP `Range`; se o servidor não aceitar intervalos, o arquivo é reiniciado.
+   O pacote permanece limitado em tamanho e só é publicado após o download
+   completo e a verificação SHA-256, quando disponível.
 4. O arquivo tar é validado e extraído em staging dentro do volume de versões.
 5. O executável esperado e suas permissões são conferidos; bits privilegiados
    são removidos e um manifesto de instalação é gravado.

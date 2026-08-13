@@ -2,6 +2,11 @@
 
 Todas as mudanças relevantes do projeto são registradas neste arquivo.
 
+## Não lançado
+
+- Adiciona retomada de downloads interrompidos com HTTP `Range`, persistência
+  privada entre execuções e validação de respostas truncadas.
+
 ## 1.0.1
 
 - Restaura o diagnóstico de sistema e hardware antes do menu interativo.

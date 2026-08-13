@@ -98,10 +98,11 @@ def test_rejeita_url_de_download_insegura(updater_module, url):
 
 
 class _RespostaBytes:
-    def __init__(self, content, url="https://example.com/app.tar.gz"):
+    def __init__(self, content, url="https://example.com/app.tar.gz", status=200, headers=None):
         self.content = io.BytesIO(content)
-        self.headers = {"Content-Length": str(len(content))}
+        self.headers = {"Content-Length": str(len(content))} if headers is None else headers
         self.url = url
+        self.status = status
 
     def __enter__(self):
         return self
@@ -117,6 +118,19 @@ class _RespostaBytes:
 
     def read(self, size=-1):
         return self.content.read(size)
+
+
+class _RespostaInterrompida(_RespostaBytes):
+    def __init__(self, content, bytes_antes_da_falha):
+        super().__init__(content)
+        self.bytes_antes_da_falha = bytes_antes_da_falha
+        self.interrompida = False
+
+    def read(self, _size=-1):
+        if not self.interrompida:
+            self.interrompida = True
+            return self.content.read(self.bytes_antes_da_falha)
+        raise urllib.error.URLError("conexão interrompida")
 
 
 def test_download_retenta_e_publica_apenas_arquivo_completo(updater_module, monkeypatch, tmp_path):
@@ -139,6 +153,93 @@ def test_download_retenta_e_publica_apenas_arquivo_completo(updater_module, monk
     )
     assert destino.read_bytes() == conteudo
     assert not Path(f"{destino}.part").exists()
+
+
+def test_download_retomado_em_nova_execucao_com_range(updater_module, monkeypatch, tmp_path):
+    conteudo = b"0123456789"
+    destino = tmp_path / "app.tar.gz"
+    parcial = tmp_path / "estado" / "download.part"
+    parcial.parent.mkdir()
+    checksum = updater_module.hashlib.sha256(conteudo).hexdigest()
+    requisicoes = []
+
+    monkeypatch.setattr(updater_module, "HTTP_RETRIES", 1)
+    monkeypatch.setattr(
+        updater_module.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _RespostaInterrompida(conteudo, 4),
+    )
+
+    assert not updater_module.download_com_progresso(
+        "https://example.com/app.tar.gz",
+        destino,
+        "App",
+        checksum,
+        arquivo_parcial=parcial,
+    )
+    assert parcial.read_bytes() == conteudo[:4]
+
+    def urlopen(request, **_kwargs):
+        requisicoes.append(request)
+        return _RespostaBytes(
+            conteudo[4:],
+            status=206,
+            headers={
+                "Content-Length": str(len(conteudo) - 4),
+                "Content-Range": f"bytes 4-{len(conteudo) - 1}/{len(conteudo)}",
+            },
+        )
+
+    monkeypatch.setattr(updater_module.urllib.request, "urlopen", urlopen)
+
+    assert updater_module.download_com_progresso(
+        "https://example.com/app.tar.gz",
+        destino,
+        "App",
+        checksum,
+        arquivo_parcial=parcial,
+    )
+    assert requisicoes[0].get_header("Range") == "bytes=4-"
+    assert destino.read_bytes() == conteudo
+    assert not parcial.exists()
+
+
+def test_download_reinicia_quando_servidor_ignora_range(updater_module, monkeypatch, tmp_path):
+    conteudo = b"arquivo completo"
+    destino = tmp_path / "app.tar.gz"
+    parcial = Path(f"{destino}.part")
+    parcial.write_bytes(b"parcial antigo")
+    requisicoes = []
+
+    def urlopen(request, **_kwargs):
+        requisicoes.append(request)
+        return _RespostaBytes(conteudo, status=200)
+
+    monkeypatch.setattr(updater_module.urllib.request, "urlopen", urlopen)
+
+    assert updater_module.download_com_progresso(
+        "https://example.com/app.tar.gz", destino, "App"
+    )
+    assert requisicoes[0].get_header("Range") == f"bytes={len(b'parcial antigo')}-"
+    assert destino.read_bytes() == conteudo
+    assert not parcial.exists()
+
+
+def test_caminho_de_resume_e_privado_e_especifico_por_url(updater_module, tmp_path):
+    estado = tmp_path / "state"
+    updater_module.configurar_caminhos(
+        tmp_path / "apps",
+        estado / "lock",
+        tmp_path / "launchers",
+        estado,
+    )
+
+    primeiro = Path(updater_module.caminho_download_parcial("https://example.com/a.tar.gz"))
+    segundo = Path(updater_module.caminho_download_parcial("https://example.com/b.tar.gz"))
+
+    assert primeiro.parent == estado / "downloads"
+    assert primeiro != segundo
+    assert stat.S_IMODE(primeiro.parent.stat().st_mode) == 0o700
 
 
 def test_download_descarta_parcial_com_checksum_incorreto(updater_module, monkeypatch, tmp_path):
