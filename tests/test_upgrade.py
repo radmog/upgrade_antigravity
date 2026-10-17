@@ -45,13 +45,48 @@ def test_extrai_changelog_por_aplicativo(updater_module, fixture_dir):
 
     assert updater_module.obter_versao_mais_recente("hub") == "1.2.3"
     assert updater_module.obter_versao_mais_recente("ide") == "4.5.6"
+    assert updater_module.obter_versao_mais_recente("cli") == "1.4.0"
+    assert updater_module.obter_versao_mais_recente("inexistente") is None
 
     notes = updater_module.obter_notas_versao("hub", "1.2.3")
     assert notes == {
-        "titulo": "Antigravity Hub 1.2.3",
+        "titulo": "Antigravity App 1.2.3",
         "resumo": "Uma versão de teste & estável.",
-        "grupos": [("Correções", ["Corrige a atualização automática."])],
+        "grupos": [
+            ("Melhorias", ["Novo painel lateral.", "Use /compact em conversas longas."]),
+            ("Correções", ["Corrige a atualização automática."]),
+        ],
     }
+
+
+def test_changelog_aceita_versao_com_build_do_download(updater_module, fixture_dir):
+    updater_module.conteudo_changelog = (fixture_dir / "changelog.html").read_text(encoding="utf-8")
+
+    com_build = updater_module.obter_notas_versao("hub", "1.2.3-5780333019398144")
+
+    assert com_build == updater_module.obter_notas_versao("hub", "1.2.3")
+    assert updater_module.obter_notas_versao("cli", "1.4.0-5281842794987520")["titulo"] == "Antigravity CLI 1.4.0"
+
+
+def test_changelog_nao_mistura_abas_nem_versoes(updater_module, fixture_dir):
+    updater_module.conteudo_changelog = (fixture_dir / "changelog.html").read_text(encoding="utf-8")
+
+    assert updater_module.obter_notas_versao("hub", "9.9.9") is None
+    assert updater_module.obter_notas_versao("ide", "1.2.3") is None
+    assert updater_module.obter_notas_versao("hub", "1.2") is None
+    anterior = updater_module.obter_notas_versao("hub", "1.2.2")
+    assert anterior == {"titulo": "Versão anterior", "resumo": "", "grupos": []}
+
+
+def test_changelog_vazio_nao_gera_notas(updater_module):
+    updater_module.conteudo_changelog = ""
+
+    assert updater_module.obter_versao_mais_recente("hub") is None
+    assert updater_module.obter_notas_versao("hub", "1.2.3") is None
+
+
+def test_url_do_changelog_aponta_para_a_pagina_de_docs(updater_module):
+    assert updater_module.obter_url_changelog("cli") == "https://antigravity.google/docs/changelog?tab=cli"
 
 
 def test_fixture_documenta_formato_atual_da_pagina_de_download(fixture_dir):

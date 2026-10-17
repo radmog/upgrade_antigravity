@@ -33,7 +33,8 @@ def test_configuracao_roundtrip_atomico_e_permissoes(tmp_path):
         cache_ttl=120,
         notifications="auto",
         log_level="DEBUG",
-        pin_hub="2.3.4-beta1",
+        pin_app="2.3.4-beta1",
+        pin_cli="1.4.0",
     )
 
     settings.save(path, configured)
@@ -69,11 +70,11 @@ def test_configuracao_rejeita_valores_invalidos(data):
 
 
 def test_config_set_converte_tipos_e_remove_pin():
-    current = settings.Settings(pin_hub="1.0.0")
+    current = settings.Settings(pin_app="1.0.0")
 
     assert settings.with_value(current, "retention", "5").retention == 5
     assert settings.with_value(current, "log_level", "debug").log_level == "DEBUG"
-    assert settings.with_value(current, "pin_hub", "none").pin_hub is None
+    assert settings.with_value(current, "pin_app", "none").pin_app is None
 
 
 def test_cache_hit_e_fallback_stale(monkeypatch, tmp_path):
@@ -222,6 +223,6 @@ def test_cli_check_forca_politica_sem_mutacao(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.core, "verificar_privilegios", pytest.fail)
 
     assert cli.main(["check", "--hub", "--user", "--channel", "preview"]) == 0
-    assert observed[0][0] == "hub"
+    assert observed[0][0] == "app"
     assert observed[0][1].channel == "preview"
     assert observed[0][1].policy == "notify-only"

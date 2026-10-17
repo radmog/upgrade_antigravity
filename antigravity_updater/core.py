@@ -24,7 +24,9 @@ import html
 import time
 import threading
 import email.utils
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional, Tuple
 
 # Cores ANSI para a interface
 CLR_RESET = "\033[0m"
@@ -43,7 +45,9 @@ PASTA_TMP = None
 DIRETORIO_DOWNLOADS = None
 ARQUIVO_LOCK = "/run/lock/antigravity-updater.lock"
 DIRETORIO_LAUNCHERS = "/usr/local/share/applications"
-URL_CHANGELOG = "https://antigravity.google/changelog"
+URL_CHANGELOG = "https://antigravity.google/docs/changelog"
+URL_INSTALADOR_CLI = "https://antigravity.google/cli/install.sh"
+URL_MANIFESTOS_CLI = "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
 HTTP_TIMEOUT = 30
 HTTP_RETRIES = 3
 HEALTHCHECK_TIMEOUT = 15
@@ -52,6 +56,52 @@ MAX_EXTRACTED_BYTES = 12 * 1024 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 200_000
 LOCK_HANDLE = None
 LOGGER = logging.getLogger("antigravity_updater")
+
+
+@dataclass(frozen=True)
+class Aplicativo:
+    """Descreve um componente gerenciado; `nome` também nomeia os diretórios no disco."""
+
+    nome: str
+    rotulo: str
+    executavel: str
+    aba: str
+    # (arquivo .desktop, título); None para aplicativos de terminal.
+    launcher: Optional[Tuple[str, str]]
+    # "pagina" descobre o .tar.gz na página de downloads; "manifesto" usa o manifesto oficial do CLI.
+    fonte: str
+    padrao_url: Optional[str]
+    # Componentes de caminho removidos dos membros do tar antes da extração.
+    strip: int
+
+
+# Os nomes internos do App permanecem "Antigravity" para preservar instalações existentes.
+APLICATIVOS = {
+    "Antigravity": Aplicativo(
+        "Antigravity", "Antigravity App", "antigravity", "hub",
+        ("antigravity-hub.desktop", "Antigravity App"), "pagina", "antigravity-hub", 1,
+    ),
+    "Antigravity_IDE": Aplicativo(
+        "Antigravity_IDE", "Antigravity IDE", "antigravity-ide", "ide",
+        ("antigravity-ide.desktop", "Antigravity IDE"), "pagina", "stable", 1,
+    ),
+    "Antigravity_CLI": Aplicativo(
+        "Antigravity_CLI", "Antigravity CLI", "antigravity", "cli",
+        None, "manifesto", None, 0,
+    ),
+}
+
+
+def obter_aplicativo(nome_app):
+    try:
+        return APLICATIVOS[nome_app]
+    except KeyError:
+        raise ValueError(f"Aplicativo desconhecido: {nome_app}") from None
+
+
+def rotulo_aplicativo(nome_app):
+    aplicativo = APLICATIVOS.get(nome_app)
+    return aplicativo.rotulo if aplicativo else nome_app
 
 
 def configurar_caminhos(diretorio_base, arquivo_lock, diretorio_launchers, diretorio_estado=None):
@@ -77,6 +127,8 @@ def verificar_privilegios():
 # Variável para acumular o conteúdo HTML + JS raspado da web
 conteudo_total = ""
 conteudo_changelog = ""
+# Manifesto oficial do CLI já interpretado (dict) ou None quando indisponível.
+manifesto_cli = None
 
 # Detecta automaticamente a arquitetura do Ubuntu do usuário
 def detectar_arquitetura(arquitetura):
@@ -262,23 +314,24 @@ def exibir_diagnosticos():
     print(f"{CLR_HEADER}╚{'═' * largura_total}╝{CLR_RESET}\n")
 
 MENU_OPCOES = (
-    (1, "Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)"),
-    (2, "Instalar/Atualizar Apenas Antigravity (Hub)"),
+    (1, "Instalar/Atualizar Todos (App, IDE & CLI)"),
+    (2, "Instalar/Atualizar Apenas Antigravity App"),
     (3, "Instalar/Atualizar Apenas Antigravity IDE"),
-    (4, "Forçar Reinstalação de Ambos (Mesma versão)"),
+    (4, "Forçar Reinstalação de Todos (Mesma versão)"),
     (5, "Consultar Changelog Oficial (com tradução)"),
     (6, "Verificar Atualizações sem Instalar"),
     (7, "Mostrar Versões Ativas"),
     (8, "Listar Histórico de Versões"),
-    (9, "Rollback de Ambos para a Versão Anterior"),
+    (9, "Rollback de Todos para a Versão Anterior"),
     (10, "Limpar Histórico Antigo (manter 2)"),
     (11, "Mostrar Configuração Efetiva"),
     (12, "Mostrar Estado do Cache"),
     (13, "Mostrar Logs Recentes"),
     (14, "Instalar/Reconciliar Launchers"),
     (15, "Mostrar Estado do Timer systemd"),
-    (16, "Desinstalar Ambos"),
-    (17, "Sair"),
+    (16, "Desinstalar Todos"),
+    (17, "Instalar/Atualizar Apenas Antigravity CLI"),
+    (18, "Sair"),
 )
 
 
@@ -366,12 +419,68 @@ def obter_checksum_remoto(url):
     return match.group(0).lower() if match else None
 
 
-def calcular_sha256(caminho):
-    digest = hashlib.sha256()
+def calcular_hash(caminho, algoritmo="sha256"):
+    digest = hashlib.new(algoritmo)
     with open(caminho, "rb") as arquivo:
         for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
             digest.update(bloco)
     return digest.hexdigest()
+
+
+def calcular_sha256(caminho):
+    return calcular_hash(caminho, "sha256")
+
+
+def detectar_plataforma_cli(arquitetura):
+    """Converte a arquitetura alvo no identificador de plataforma do manifesto do CLI."""
+    base = {"linux-x64": "linux_amd64", "linux-arm": "linux_arm64"}.get(arquitetura)
+    if base is None:
+        raise ValueError(f"Arquitetura sem build do CLI: {arquitetura}")
+    sufixo = "x86_64" if base.endswith("amd64") else "aarch64"
+    musl = os.path.exists(f"/lib/libc.musl-{sufixo}.so.1")
+    if not musl:
+        try:
+            saida = subprocess.run(
+                ["ldd", "/bin/ls"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, timeout=5, check=False,
+            ).stdout
+            musl = "musl" in saida
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return f"{base}_musl" if musl else base
+
+
+def descobrir_base_manifestos_cli(script_instalador):
+    """Lê a base dos manifestos no instalador oficial, com fallback para a conhecida."""
+    match = re.search(r'^DOWNLOAD_BASE_URL="(https://[^"\s]+)"', script_instalador or "", re.MULTILINE)
+    return match.group(1).rstrip("/") if match else URL_MANIFESTOS_CLI
+
+
+def interpretar_manifesto_cli(texto):
+    """Valida o manifesto JSON do CLI; retorna None se estiver ausente ou malformado."""
+    try:
+        dados = json.loads(texto)
+        url = validar_url_download(dados["url"])
+        sha512 = str(dados["sha512"]).lower()
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{128}", sha512):
+        return None
+    return {"version": dados.get("version"), "url": url, "sha512": sha512}
+
+
+def selecionar_download_manifesto(manifesto, canal="stable", versao_fixada=None):
+    """Aplica canal e pin ao manifesto do CLI. Retorna (url, sha512) ou None."""
+    if canal not in ("stable", "preview"):
+        raise ValueError(f"Canal desconhecido: {canal}")
+    if not manifesto:
+        return None
+    versao = extrair_versao_url(manifesto["url"])
+    if not versao or (versao_fixada and versao != versao_fixada):
+        return None
+    if canal == "stable" and chave_versao(versao)[3] == 0:
+        return None
+    return manifesto["url"], manifesto["sha512"]
 
 # Retorna o idioma preferencial do sistema (pt_BR.UTF-8 -> pt).
 def obter_idioma_sistema():
@@ -398,24 +507,39 @@ def obter_url_changelog(aba, traduzir=False):
         )
     return url_oficial
 
+def _localizar_artigo_versao(aba, versao):
+    """Retorna o HTML do artigo de uma versão no changelog (`id="rel-<aba>-<versão>"`).
+
+    Os downloads trazem o identificador de build (`2.24.0-5780333019398144`), mas o
+    changelog usa apenas a versão numérica; por isso o sufixo numérico é descartado
+    como segunda tentativa.
+    """
+    candidatos = [versao]
+    sem_build = re.sub(r"-\d{6,}$", "", versao)
+    if sem_build != versao:
+        candidatos.append(sem_build)
+    for candidato in candidatos:
+        match = re.search(
+            rf'<article\b[^>]*\bid="rel-{re.escape(aba)}-{re.escape(candidato)}"[^>]*>(.*?)</article>',
+            conteudo_changelog,
+            re.DOTALL,
+        )
+        if match:
+            return match.group(1)
+    return None
+
+
 def obter_notas_versao(aba, versao):
     """Extrai as notas exatas de uma versão do HTML oficial do changelog."""
     if not conteudo_changelog:
         return None
-
-    marcador_linha = '<div class="section-row-wrapper"'
-    marcador_versao = f'href="/releases?tab={aba}&amp;version={versao}"'
-    trecho = next(
-        (parte for parte in conteudo_changelog.split(marcador_linha)
-         if marcador_versao in parte),
-        None,
-    )
-    if not trecho:
+    trecho = _localizar_artigo_versao(aba, versao)
+    if trecho is None:
         return None
 
-    titulo_match = re.search(r'<h3\b[^>]*>(.*?)</h3>', trecho, re.DOTALL)
+    titulo_match = re.search(r'<h3\b[^>]*\brn-headline\b[^>]*>(.*?)</h3>', trecho, re.DOTALL)
     resumo_match = re.search(
-        r'<div class="changes"[^>]*>\s*<p[^>]*>(.*?)</p>',
+        r'<div\b[^>]*\brn-summary\b[^>]*>\s*<p[^>]*>(.*?)</p>',
         trecho,
         re.DOTALL,
     )
@@ -424,11 +548,13 @@ def obter_notas_versao(aba, versao):
         nome_match = re.search(r'<summary[^>]*>(.*?)</summary>', detalhe, re.DOTALL)
         if not nome_match:
             continue
+        # O contador "(13)" é redundante: os itens são listados logo abaixo.
+        nome = re.sub(r'<span\b[^>]*\brn-count\b[^>]*>.*?</span>', "", nome_match.group(1), flags=re.DOTALL)
         itens = [
             limpar_html(item)
             for item in re.findall(r'<li\b[^>]*>(.*?)</li>', detalhe, re.DOTALL)
         ]
-        grupos.append((limpar_html(nome_match.group(1)), [item for item in itens if item]))
+        grupos.append((limpar_html(nome), [item for item in itens if item]))
 
     return {
         "titulo": limpar_html(titulo_match.group(1)) if titulo_match else "",
@@ -437,10 +563,11 @@ def obter_notas_versao(aba, versao):
     }
 
 def obter_versao_mais_recente(aba):
+    """Versão mais recente de uma aba: o primeiro artigo da linha do tempo."""
     if not conteudo_changelog:
         return None
     match = re.search(
-        rf'href="/releases\?tab={re.escape(aba)}&amp;version=([^"&]+)"',
+        rf'<article\b[^>]*\bid="rel-{re.escape(aba)}-([^"]+)"',
         conteudo_changelog,
     )
     return html.unescape(match.group(1)) if match else None
@@ -468,7 +595,8 @@ def exibir_notas_versao(nome_app, aba, versao):
 def consultar_changelog():
     print(f"\n{CLR_HEADER}CHANGELOG OFICIAL — VERSÕES MAIS RECENTES{CLR_RESET}")
     encontrados = False
-    for nome_app, aba in (("Antigravity", "hub"), ("Antigravity_IDE", "ide")):
+    for aplicativo in APLICATIVOS.values():
+        nome_app, aba = aplicativo.rotulo, aplicativo.aba
         versao = obter_versao_mais_recente(aba)
         if versao:
             exibir_notas_versao(nome_app, aba, versao)
@@ -541,15 +669,17 @@ def _tamanho_parcial(caminho):
     return info.st_size
 
 
-def _publicar_download(arquivo_parcial, dest_path, checksum_esperado):
+def _publicar_download(arquivo_parcial, dest_path, checksum_esperado, algoritmo="sha256"):
     tamanho = _tamanho_parcial(arquivo_parcial)
     if tamanho == 0:
         raise _DownloadInvalido("O arquivo baixado está vazio.")
     if tamanho > MAX_DOWNLOAD_BYTES:
         raise _DownloadInvalido("O pacote excede o limite máximo permitido.")
-    digest = calcular_sha256(arquivo_parcial)
+    digest = calcular_hash(arquivo_parcial, algoritmo)
     if checksum_esperado and digest != checksum_esperado.lower():
-        raise _DownloadInvalido("O SHA-256 do pacote não corresponde ao checksum publicado.")
+        raise _DownloadInvalido(
+            f"O {algoritmo.upper().replace('SHA', 'SHA-')} do pacote não corresponde ao checksum publicado."
+        )
 
     try:
         os.replace(arquivo_parcial, dest_path)
@@ -581,7 +711,9 @@ def _mostrar_progresso(app_name, downloaded, total_size):
 
 
 # Download com barra de progresso animada e retomada HTTP (Range).
-def download_com_progresso(url, dest_path, app_name, checksum_esperado=None, arquivo_parcial=None):
+def download_com_progresso(
+    url, dest_path, app_name, checksum_esperado=None, arquivo_parcial=None, algoritmo_checksum="sha256"
+):
     validar_url_download(url)
     arquivo_parcial = os.fspath(arquivo_parcial or f"{dest_path}.part")
     ultimo_erro = None
@@ -665,7 +797,7 @@ def download_com_progresso(url, dest_path, app_name, checksum_esperado=None, arq
                 if total_size and downloaded != total_size:
                     raise OSError(f"Download incompleto: recebidos {downloaded} de {total_size} bytes.")
 
-            _publicar_download(arquivo_parcial, dest_path, checksum_esperado)
+            _publicar_download(arquivo_parcial, dest_path, checksum_esperado, algoritmo_checksum)
             sys.stdout.write("\n")
             return True
         except Exception as erro:
@@ -676,7 +808,7 @@ def download_com_progresso(url, dest_path, app_name, checksum_esperado=None, arq
                 total_remoto = _total_range_nao_satisfativel(headers_erro.get("Content-Range"))
                 try:
                     if total_remoto and _tamanho_parcial(arquivo_parcial) == total_remoto:
-                        _publicar_download(arquivo_parcial, dest_path, checksum_esperado)
+                        _publicar_download(arquivo_parcial, dest_path, checksum_esperado, algoritmo_checksum)
                         sys.stdout.write("\n")
                         return True
                 except _DownloadInvalido as erro_validacao:
@@ -695,21 +827,30 @@ def download_com_progresso(url, dest_path, app_name, checksum_esperado=None, arq
         print(f"  {CLR_BLUE}O download parcial foi preservado para retomada.{CLR_RESET}")
     return False
 
+def possui_launcher(nome_app):
+    return obter_aplicativo(nome_app).launcher is not None
+
+
 def _dados_launcher(nome_app):
-    if nome_app == "Antigravity":
-        return "antigravity-hub.desktop", "antigravity", "Antigravity Hub"
-    if nome_app == "Antigravity_IDE":
-        return "antigravity-ide.desktop", "antigravity-ide", "Antigravity IDE"
-    raise ValueError(f"Aplicativo desconhecido: {nome_app}")
+    aplicativo = obter_aplicativo(nome_app)
+    if aplicativo.launcher is None:
+        raise ValueError(f"{aplicativo.rotulo} não possui launcher.")
+    arquivo, titulo = aplicativo.launcher
+    return arquivo, aplicativo.executavel, titulo
 
 
 def caminho_launcher(nome_app):
+    """Retorna o caminho do launcher ou None para aplicativos de terminal."""
+    if not possui_launcher(nome_app):
+        return None
     arquivo, _executavel, _titulo = _dados_launcher(nome_app)
     return os.path.join(DIRETORIO_LAUNCHERS, arquivo)
 
 
 def criar_atalho(nome_app):
     """Instala um launcher XDG para uma versão já ativa."""
+    if not possui_launcher(nome_app):
+        return False
     _arquivo, executavel, titulo = _dados_launcher(nome_app)
     exec_path = os.path.join(DIRETORIO_BASE, nome_app, executavel)
     if not os.path.isfile(exec_path) or not os.access(exec_path, os.X_OK):
@@ -747,6 +888,8 @@ Categories=Development;
 
 def remover_atalho(nome_app):
     destino = caminho_launcher(nome_app)
+    if destino is None:
+        return False
     if os.path.isdir(destino) and not os.path.islink(destino):
         raise RuntimeError(f"O caminho do launcher não é um arquivo: {destino}")
     if os.path.lexists(destino):
@@ -764,8 +907,8 @@ def _partes_caminho_tar(caminho):
     return partes
 
 
-def preparar_membros_tar(tar):
-    """Valida e adapta membros para uma extração com strip-components=1."""
+def preparar_membros_tar(tar, strip=1):
+    """Valida e adapta membros para uma extração com strip-components=`strip`."""
     membros = tar.getmembers()
     if len(membros) > MAX_ARCHIVE_MEMBERS:
         raise ValueError("O pacote contém arquivos demais.")
@@ -779,9 +922,9 @@ def preparar_membros_tar(tar):
         if membro.ischr() or membro.isblk() or membro.isfifo():
             raise ValueError(f"Tipo de arquivo não permitido no pacote: {membro.name}")
         partes = _partes_caminho_tar(membro.name)
-        if len(partes) == 1:
+        if len(partes) <= strip:
             continue
-        membro.name = "/".join(partes[1:])
+        membro.name = "/".join(partes[strip:])
 
         if membro.issym():
             alvo = membro.linkname
@@ -793,9 +936,9 @@ def preparar_membros_tar(tar):
             caminhos_links.add(membro.name.rstrip("/"))
         elif membro.islnk():
             partes_alvo = _partes_caminho_tar(membro.linkname)
-            if len(partes_alvo) == 1:
+            if len(partes_alvo) <= strip:
                 raise ValueError(f"Hard link inválido no pacote: {membro.name}")
-            membro.linkname = "/".join(partes_alvo[1:])
+            membro.linkname = "/".join(partes_alvo[strip:])
         seguros.append(membro)
 
     for membro in seguros:
@@ -806,12 +949,12 @@ def preparar_membros_tar(tar):
     return seguros
 
 
-def extrair_pacote_seguro(arquivo_tar, destino):
+def extrair_pacote_seguro(arquivo_tar, destino, strip=1):
     """Extrai um pacote validado para um diretório vazio de staging."""
     if os.listdir(destino):
         raise ValueError("O diretório de staging precisa estar vazio.")
     with tarfile.open(arquivo_tar, "r:gz") as tar:
-        membros = preparar_membros_tar(tar)
+        membros = preparar_membros_tar(tar, strip)
         kwargs = {}
         if "filter" in inspect.signature(tar.extractall).parameters:
             kwargs["filter"] = "data"
@@ -819,7 +962,7 @@ def extrair_pacote_seguro(arquivo_tar, destino):
 
 
 def validar_instalacao_extraida(nome_app, staging):
-    executavel = "antigravity" if nome_app == "Antigravity" else "antigravity-ide"
+    executavel = obter_aplicativo(nome_app).executavel
     caminho = os.path.join(staging, executavel)
     if not os.path.isfile(caminho):
         raise ValueError(f"Executável esperado não encontrado: {executavel}")
@@ -841,7 +984,9 @@ def normalizar_permissoes_staging(staging):
                 os.chmod(caminho, modo & ~0o6000)
 
 
-def preparar_versao_em_staging(nome_app, versao, arquivo_tar, url, sha256, checksum_verificado):
+def preparar_versao_em_staging(
+    nome_app, versao, arquivo_tar, url, sha256, checksum_verificado, algoritmo_checksum="sha256"
+):
     pasta_versoes = os.path.join(DIRETORIO_BASE, f"{nome_app}_VERSOES")
     os.makedirs(pasta_versoes, exist_ok=True)
     staging = tempfile.mkdtemp(prefix=f".{nome_app}-{versao}-", dir=pasta_versoes)
@@ -849,7 +994,7 @@ def preparar_versao_em_staging(nome_app, versao, arquivo_tar, url, sha256, check
     if os.path.lexists(destino):
         destino = f"{destino}-reinstall-{time.time_ns()}"
     try:
-        extrair_pacote_seguro(arquivo_tar, staging)
+        extrair_pacote_seguro(arquivo_tar, staging, obter_aplicativo(nome_app).strip)
         validar_instalacao_extraida(nome_app, staging)
         normalizar_permissoes_staging(staging)
         with open(os.path.join(staging, "version.txt"), "w", encoding="utf-8") as arquivo:
@@ -860,6 +1005,7 @@ def preparar_versao_em_staging(nome_app, versao, arquivo_tar, url, sha256, check
             "source_url": url,
             "sha256": sha256,
             "checksum_verified": checksum_verificado,
+            "checksum_algorithm": algoritmo_checksum,
             "installed_at": datetime.now().astimezone().isoformat(),
         }
         with open(os.path.join(staging, ".install-manifest.json"), "w", encoding="utf-8") as arquivo:
@@ -1104,7 +1250,7 @@ def desinstalar_aplicativo(nome_app):
     if os.path.isdir(estado) and not os.path.islink(estado):
         raise RuntimeError(f"O estado não é um arquivo gerenciado: {estado}")
     launcher = caminho_launcher(nome_app)
-    if os.path.isdir(launcher) and not os.path.islink(launcher):
+    if launcher and os.path.isdir(launcher) and not os.path.islink(launcher):
         raise RuntimeError(f"O caminho do launcher não é um arquivo: {launcher}")
 
     alterado = False
@@ -1117,7 +1263,7 @@ def desinstalar_aplicativo(nome_app):
     if os.path.lexists(estado):
         os.unlink(estado)
         alterado = True
-    if os.path.lexists(launcher):
+    if launcher and os.path.lexists(launcher):
         os.unlink(launcher)
         alterado = True
     return alterado
@@ -1129,9 +1275,9 @@ def exibir_estado_aplicativos(nomes, detalhado=False):
         ativa = next((item for item in versoes if item["active"]), None)
         if not detalhado:
             valor = ativa["version"] if ativa else "não instalada"
-            print(f"{nome_app}: {valor}")
+            print(f"{rotulo_aplicativo(nome_app)}: {valor}")
             continue
-        print(f"\n{nome_app}:")
+        print(f"\n{rotulo_aplicativo(nome_app)}:")
         if not versoes:
             print("  Nenhuma versão instalada.")
         for item in versoes:
@@ -1141,13 +1287,14 @@ def exibir_estado_aplicativos(nomes, detalhado=False):
 
 
 def selecionar_aplicativos(argumentos):
-    hub = any(item in ("hub", "antigravity") for item in argumentos)
-    ide = any(item in ("ide", "antigravity-ide") for item in argumentos)
-    if hub and not ide:
-        return ["Antigravity"]
-    if ide and not hub:
-        return ["Antigravity_IDE"]
-    return ["Antigravity", "Antigravity_IDE"]
+    escolhidos = []
+    if any(item in ("app", "hub", "antigravity") for item in argumentos):
+        escolhidos.append("Antigravity")
+    if any(item in ("ide", "antigravity-ide") for item in argumentos):
+        escolhidos.append("Antigravity_IDE")
+    if any(item in ("cli", "antigravity-cli") for item in argumentos):
+        escolhidos.append("Antigravity_CLI")
+    return escolhidos or ["Antigravity", "Antigravity_IDE", "Antigravity_CLI"]
 
 
 def extrair_versao_url(url):
@@ -1186,22 +1333,31 @@ def atualizar_aplicativo(
     politica="latest",
     versao_fixada=None,
 ):
-    print(f"\n{CLR_BLUE}⚡ Analisando: {nome_app} ({padrao_url}) {CLR_RESET}")
+    aplicativo = APLICATIVOS.get(nome_app)
+    rotulo = rotulo_aplicativo(nome_app)
+    por_manifesto = aplicativo is not None and aplicativo.fonte == "manifesto"
+    origem = "manifesto oficial" if por_manifesto else padrao_url
+    print(f"\n{CLR_BLUE}⚡ Analisando: {rotulo} ({origem}) {CLR_RESET}")
     print(f"  {CLR_GRAY}----------------------------------------{CLR_RESET}")
 
     if politica not in ("latest", "notify-only"):
         print(f"  {CLR_FAIL}Política de versão desconhecida: {politica}.{CLR_RESET}")
         return False
-    url_download = selecionar_url_download(
-        conteudo_total,
-        padrao_url,
-        ARCH_ALVO,
-        canal=canal,
-        versao_fixada=versao_fixada,
-    )
+    checksum_oficial = None
+    if por_manifesto:
+        selecao = selecionar_download_manifesto(manifesto_cli, canal, versao_fixada)
+        url_download, checksum_oficial = selecao if selecao else (None, None)
+    else:
+        url_download = selecionar_url_download(
+            conteudo_total,
+            padrao_url,
+            ARCH_ALVO,
+            canal=canal,
+            versao_fixada=versao_fixada,
+        )
 
     if not url_download:
-        print(f"  {CLR_WARNING}⚠ Link de download não disponível para {nome_app} ({ARCH_ALVO}).{CLR_RESET}")
+        print(f"  {CLR_WARNING}⚠ Link de download não disponível para {rotulo} ({ARCH_ALVO}).{CLR_RESET}")
         return False
 
     try:
@@ -1213,7 +1369,7 @@ def atualizar_aplicativo(
     # 2. Extrair a versão a partir do link de download
     versao_web = extrair_versao_url(url_download)
     if not versao_web:
-        print(f"  {CLR_WARNING}⚠ Não foi possível extrair a versão de {nome_app} do link.{CLR_RESET}")
+        print(f"  {CLR_WARNING}⚠ Não foi possível extrair a versão de {rotulo} do link.{CLR_RESET}")
         return False
 
     # 3. Verificar versão local atual e data de instalação
@@ -1253,7 +1409,7 @@ def atualizar_aplicativo(
             }
         },
     )
-    exibir_notas_versao(nome_app, aba_changelog, versao_web)
+    exibir_notas_versao(rotulo, aba_changelog, versao_web)
 
     if politica == "notify-only":
         if versao_local != versao_web:
@@ -1270,9 +1426,10 @@ def atualizar_aplicativo(
             print(f"  {CLR_WARNING}➜ Nova versão disponível! Inicializando download...{CLR_RESET}")
         arquivo_tar = os.path.join(PASTA_TMP, f"{nome_app}.tar.gz")
 
-        checksum_esperado = obter_checksum_remoto(url_download)
+        algoritmo = "sha512" if checksum_oficial else "sha256"
+        checksum_esperado = checksum_oficial or obter_checksum_remoto(url_download)
         if checksum_esperado:
-            print(f"  {CLR_BLUE}SHA-256 oficial encontrado; o pacote será verificado.{CLR_RESET}")
+            print(f"  {CLR_BLUE}{algoritmo.upper().replace('SHA', 'SHA-')} oficial encontrado; o pacote será verificado.{CLR_RESET}")
         else:
             print(f"  {CLR_WARNING}Checksum oficial não publicado; o SHA-256 local será registrado.{CLR_RESET}")
 
@@ -1281,9 +1438,10 @@ def atualizar_aplicativo(
         if not download_com_progresso(
             url_download,
             arquivo_tar,
-            nome_app,
+            rotulo,
             checksum_esperado,
             arquivo_parcial=arquivo_parcial,
+            algoritmo_checksum=algoritmo,
         ):
             return False
 
@@ -1291,7 +1449,7 @@ def atualizar_aplicativo(
             print(f"  {CLR_FAIL}Erro: Arquivo baixado está vazio.{CLR_RESET}")
             return False
 
-        spinner_extrai = TerminalSpinner(f"Extraindo arquivos para {nome_app}-{versao_web}")
+        spinner_extrai = TerminalSpinner(f"Extraindo arquivos para {rotulo} {versao_web}")
         spinner_extrai.start()
 
         try:
@@ -1303,26 +1461,27 @@ def atualizar_aplicativo(
                 url_download,
                 digest,
                 checksum_esperado is not None,
+                algoritmo if checksum_esperado else "sha256",
             )
         except Exception as e:
-            spinner_extrai.stop(success=False, final_msg=f"Falha ao extrair {nome_app}: {e}")
+            spinner_extrai.stop(success=False, final_msg=f"Falha ao extrair {rotulo}: {e}")
             return False
 
-        spinner_extrai.stop(success=True, final_msg=f"Extraído com sucesso para: {nome_app}-{versao_web}")
+        spinner_extrai.stop(success=True, final_msg=f"Extraído com sucesso para: {rotulo} {versao_web}")
 
         spinner_link = TerminalSpinner("Testando e ativando a nova versão atomicamente")
         spinner_link.start()
         try:
             versao_runtime = ativar_versao_atomica(nome_app, pasta_nova_versao)
         except Exception as e:
-            spinner_link.stop(success=False, final_msg=f"Falha ao ativar {nome_app}; versão anterior preservada: {e}")
+            spinner_link.stop(success=False, final_msg=f"Falha ao ativar {rotulo}; versão anterior preservada: {e}")
             return False
 
         spinner_link.stop(success=True, final_msg=f"Versão ativada e saudável ({versao_runtime})")
         criar_atalho(nome_app)
-        print(f"  {CLR_GREEN}✓ {nome_app} atualizado com sucesso!{CLR_RESET}")
+        print(f"  {CLR_GREEN}✓ {rotulo} atualizado com sucesso!{CLR_RESET}")
         return True
     else:
         criar_atalho(nome_app)
-        print(f"  {CLR_GREEN}✓ {nome_app} já está atualizado na versão mais recente.{CLR_RESET}")
+        print(f"  {CLR_GREEN}✓ {rotulo} já está atualizado na versão mais recente.{CLR_RESET}")
         return True

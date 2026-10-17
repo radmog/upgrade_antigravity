@@ -136,7 +136,7 @@ def test_unidades_systemd_de_usuario_usam_cli_e_escopo_corretos(tmp_path):
         "Mon..Fri 02:00",
     )
 
-    assert '"update" "--both" "--user"' in service
+    assert '"update" "--all" "--user"' in service
     assert f'Environment="XDG_DATA_HOME={paths.launcher_dir.parent}"' in service
     assert "NoNewPrivileges=true" in service
     assert "UMask=0077" in service

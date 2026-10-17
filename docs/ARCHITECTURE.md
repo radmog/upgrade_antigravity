@@ -29,7 +29,7 @@ privilégios.
 
 A forma canônica usa subcomandos para atualização, consulta, histórico,
 integração Linux, configuração, cache e logs. A camada de normalização aceita as opções históricas,
-incluindo `--both`, `--hub`, `--ide`, `--reinstall` e as opções numéricas do
+incluindo `--both`, `--hub` (hoje `--app`), `--ide`, `--reinstall` e as opções numéricas do
 menu. Tanto `upgrade.py` quanto `upgrade.sh` chegam ao mesmo parser e ao mesmo
 motor, evitando divergência de segurança e comportamento entre linguagens.
 
@@ -44,7 +44,7 @@ XDG sob o diretório pessoal.
 Launchers apontam para o symlink ativo, portanto não precisam ser reescritos a
 cada versão, embora a atualização os reconcilie automaticamente. A
 desinstalação remove somente o link ativo validado, o histórico do aplicativo,
-seu estado e launcher. Ao remover ambos os aplicativos, a CLI também desativa e
+seu estado e launcher. Ao remover todos os aplicativos, a CLI também desativa e
 remove um timer gerenciado existente, salvo com `--keep-systemd`.
 
 `systemd install` publica um serviço oneshot e um timer persistente no escopo
@@ -56,7 +56,7 @@ global, usa o gerenciador de sistema e requer root.
 
 Cada escopo possui configuração própria em JSON. O esquema fechado define canal
 (`stable` ou `preview`), política (`latest` ou `notify-only`), retenção, TTL do
-cache, notificações, nível de log e pins independentes para Hub e IDE. Opções da
+cache, notificações, nível de log e pins independentes para App, IDE e CLI (`pin_hub` é aceito como nome antigo de `pin_app`). Opções da
 CLI podem sobrescrever canal e política apenas durante uma execução.
 
 A seleção de versão primeiro restringe aplicativo e arquitetura, depois aplica
@@ -114,3 +114,25 @@ do `version.txt` e manifesto de cada versão. `current` e `list` consultam esse
 catálogo; `rollback` ativa uma versão já validada usando a mesma transação.
 `prune` preserva sempre a versão ativa e a anterior, mesmo quando o limite
 solicitado for menor que dois.
+
+## Antigravity CLI e renomeação do Hub para App
+
+Os componentes são descritos por um registro (`core.APLICATIVOS`) com rótulo,
+executável, launcher, aba de changelog, origem do download e quantidade de
+componentes de caminho removidos na extração. Os nomes internos do App
+(`Antigravity`, `Antigravity_VERSOES`, `antigravity-hub.desktop`) permanecem
+para não orfanar instalações; só rótulos, flags, menu e configuração mudaram.
+Identificadores publicados pelo site (`antigravity-hub/` nas URLs, `tab=hub`)
+também permanecem.
+
+O App e o IDE descobrem o `.tar.gz` na página de downloads. O CLI usa o manifesto
+JSON por plataforma (`linux_amd64`, `linux_arm64`, com sufixo `_musl` quando
+aplicável), cuja base é lida do instalador oficial com fallback para a base
+conhecida. O manifesto fornece o SHA-512 do pacote, que é verificado antes da
+publicação. O pacote do CLI é plano (o executável `antigravity` fica na raiz),
+por isso sua extração usa `strip=0`; todas as validações de caminho, link e
+tamanho continuam valendo. O CLI não possui launcher por ser um aplicativo de
+terminal. Como o manifesto só publica a versão mais recente, o pin do CLI
+apenas confirma essa versão e não inventa URLs de versões antigas.
+
+`--both` continua significando App e IDE; `--all` inclui o CLI e é o padrão.

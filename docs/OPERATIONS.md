@@ -42,16 +42,16 @@ o escopo de sistema. A opção **Sair** é sempre a
 
 ```bash
 # Consultar sem modificar
-./upgrade.py check --both --user
+./upgrade.py check --all --user
 ./upgrade.py current --user
 
 # Atualizar e inspecionar
-./upgrade.py update --both --user
+./upgrade.py update --all --user
 ./upgrade.py list --user
 ./upgrade.py logs --tail 50 --user
 
 # Recuperar a versão anterior
-./upgrade.py rollback --both --user
+./upgrade.py rollback --all --user
 ```
 
 Para automação, instale o timer no mesmo escopo da instalação:
@@ -97,7 +97,7 @@ ser removida posteriormente por `prune`.
 
 ### Timer reinstalando um aplicativo removido
 
-Use `systemd remove` no mesmo escopo. `uninstall --both` remove automaticamente
+Use `systemd remove` no mesmo escopo. `uninstall --all` (ou `--both`) remove automaticamente
 um timer gerenciado, salvo quando `--keep-systemd` é informado.
 
 ## Backup e auditoria

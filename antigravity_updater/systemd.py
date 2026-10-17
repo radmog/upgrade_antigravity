@@ -24,7 +24,7 @@ def render_units(paths: ScopePaths, python: Path, entrypoint: Path, calendar: st
     scope_flag = "--user" if paths.scope == "user" else "--system"
     command = " ".join(
         _unit_argument(str(item))
-        for item in (python, entrypoint, "update", "--both", scope_flag)
+        for item in (python, entrypoint, "update", "--all", scope_flag)
     )
     environment_lines = ""
     if paths.scope == "user":

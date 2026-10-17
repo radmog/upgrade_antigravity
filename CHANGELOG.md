@@ -2,6 +2,19 @@
 
 Todas as mudanças relevantes do projeto são registradas neste arquivo.
 
+## Não lançado
+
+- Renomeia Hub para App em rótulos, menu, flags (`--app`) e configuração
+  (`pin_app`); `--hub`, `hub` e `pin_hub` continuam aceitos.
+- Adiciona o Antigravity CLI (`--cli`, `pin_cli`), instalado pelo manifesto
+  oficial com verificação SHA-512, sem launcher.
+- `--all` (App, IDE e CLI) passa a ser o alvo padrão; `--both` continua sendo
+  App e IDE. Novos timers systemd executam `update --all`.
+- Corrige as notas de versão: o changelog oficial migrou para `/docs/changelog`
+  com novo HTML, e o parser agora lê `<article id="rel-<aba>-<versão>">`,
+  aceitando versões com o build numérico anexado pelo download.
+- Menu: a opção 17 instala apenas o CLI e **Sair** passa a ser a 18.
+
 ## 1.1.0
 
 - Adiciona retomada de downloads interrompidos com HTTP `Range`, persistência

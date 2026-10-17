@@ -1,6 +1,6 @@
 # Antigravity Updater & Installer
 
-Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity** (Hub) e o **Antigravity IDE** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
+Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity App** (antes chamado de Hub), o **Antigravity IDE** e o **Antigravity CLI** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
 
 A versão `1.1.0` é a release estável atual; `1.0.0` foi a primeira release estável. Consulte a
 [matriz de compatibilidade](docs/COMPATIBILITY.md), o
@@ -10,6 +10,7 @@ e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.
 ## ⚡ Funcionalidades Principais
 
 - **Detecção Automática de Arquitetura**: Suporte para arquiteturas de 64 bits (`linux-x64`) e ARM (`linux-arm`).
+- **Antigravity CLI**: Instalado pelo manifesto oficial do CLI (descoberto no instalador publicado), com SHA-512 verificado e o mesmo pipeline de staging, ativação atômica e rollback. É um aplicativo de terminal e, por isso, não possui launcher.
 - **Diagnóstico do Sistema**: Coleta e exibe especificações de hardware (sistema operacional, processador, threads da CPU, memória RAM em uso/total e espaço em disco disponível) em uma tabela visual elegante no terminal.
 - **Web Scraping Dinâmico**: Realiza buscas automáticas na página oficial de downloads (`https://antigravity.google/download`) e rastreia scripts JavaScript referenciados para identificar as URLs e versões estáveis mais recentes.
 - **Exibição de Datas e Horários**: Exibe a data/hora do lançamento da versão no servidor remoto (obtida via cabeçalho HTTP `Last-Modified`) e a data/hora de instalação da versão local presente na máquina.
@@ -78,23 +79,24 @@ memória RAM e espaço disponível e total em disco.
 
 **Opções do menu:**
 
-1. Instalar/Atualizar Ambos (Antigravity & Antigravity IDE)
-2. Instalar/Atualizar Apenas Antigravity (Hub)
+1. Instalar/Atualizar Todos (App, IDE & CLI)
+2. Instalar/Atualizar Apenas Antigravity App
 3. Instalar/Atualizar Apenas Antigravity IDE
-4. Forçar Reinstalação de Ambos
+4. Forçar Reinstalação de Todos
 5. Consultar Changelog Oficial (com tradução)
 6. Verificar atualizações sem instalar
 7. Mostrar versões ativas
 8. Listar histórico de versões
-9. Rollback de ambos para a versão anterior
+9. Rollback de todos para a versão anterior
 10. Limpar histórico antigo
 11. Mostrar configuração efetiva
 12. Mostrar estado do cache
 13. Mostrar logs recentes
 14. Instalar/reconciliar launchers
 15. Mostrar estado do timer systemd
-16. Desinstalar ambos
-17. **Sair**
+16. Desinstalar todos
+17. Instalar/Atualizar Apenas Antigravity CLI
+18. **Sair**
 
 `Sair` é sempre a última opção. A desinstalação pelo menu exige a confirmação
 literal `REMOVER` antes de qualquer alteração.
@@ -103,32 +105,40 @@ literal `REMOVER` antes de qualquer alteração.
 A sintaxe canônica usa subcomandos:
 
 ```bash
-# Para atualizar ambos
+# Para atualizar tudo (App, IDE e CLI; é o padrão)
+sudo ./upgrade.py update --all
+sudo ./upgrade.sh update --all
+
+# Instalar tudo somente para o usuário atual, sem sudo
+./upgrade.py update --all --user
+
+# Apenas App e IDE, como em versões anteriores
 sudo ./upgrade.py update --both
-sudo ./upgrade.sh update --both
 
-# Instalar ambos somente para o usuário atual, sem sudo
-./upgrade.py update --both --user
+# Para atualizar apenas o Antigravity App
+sudo ./upgrade.py update --app
 
-# Para atualizar apenas o Antigravity (Hub)
-sudo ./upgrade.py update --hub
+# Para atualizar apenas o Antigravity CLI
+./upgrade.py update --cli --user
 
 # Para atualizar apenas o Antigravity IDE
 sudo ./upgrade.py update --ide
 
-# Para forçar reinstalação de ambos (mesmo na mesma versão)
-sudo ./upgrade.py update --both --force
+# Para forçar reinstalação de todos (mesmo na mesma versão)
+sudo ./upgrade.py update --all --force
 
 # Para consultar as notas mais recentes sem instalar/atualizar
 ./upgrade.py changelog
 
 # Verificar atualizações sem modificar a instalação
-./upgrade.py check --both --user
+./upgrade.py check --all --user
 ```
 
-As formas históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both` e
+`--both` continua significando App e IDE; `--all` inclui também o CLI. `--hub`
+e `hub` continuam aceitos como nomes antigos de `--app` e `app`. As formas
+históricas (`--both`, `--hub`, `--ide`, `--reinstall`, `both` e
 `force`) continuam aceitas pelas duas entradas. As opções numéricas seguem o
-menu atual; por isso, `6` agora verifica atualizações e `17` encerra. Os aliases
+menu atual; por isso, `6` verifica atualizações, `17` instala/atualiza apenas o CLI e `18` encerra. Os aliases
 textuais `exit` e `quit` continuam encerrando diretamente.
 
 ### Gerenciamento das versões instaladas
@@ -140,19 +150,19 @@ Os comandos abaixo não acessam a rede:
 ./upgrade.py current
 ./upgrade.sh current
 
-# Listar todo o histórico; use --hub ou --ide para filtrar
-./upgrade.py list --hub
+# Listar todo o histórico; use --app, --ide ou --cli para filtrar
+./upgrade.py list --app
 ./upgrade.sh list --ide
 
 # Consultar a instalação do usuário em vez da instalação global
 ./upgrade.py current --user
 
 # Voltar para a versão anterior registrada
-sudo ./upgrade.py rollback --hub
-sudo ./upgrade.sh rollback --hub
+sudo ./upgrade.py rollback --app
+sudo ./upgrade.sh rollback --app
 
 # Selecionar explicitamente uma versão
-sudo ./upgrade.py rollback 2.5.0-5471848641724416 --hub
+sudo ./upgrade.py rollback 2.5.0-5471848641724416 --app
 
 # Manter pelo menos duas versões por aplicativo
 sudo ./upgrade.py prune 2
@@ -165,17 +175,17 @@ portanto, `--prune 1` ainda poderá conservar duas versões.
 
 ```bash
 # Remover apenas a instalação do usuário
-./upgrade.py uninstall --both --user
+./upgrade.py uninstall --all --user
 
 # Remover a instalação global
-sudo ./upgrade.py uninstall --both --system
+sudo ./upgrade.py uninstall --all --system
 
 # Recriar ou remover launchers do menu de aplicativos
-./upgrade.py launcher install --both --user
-./upgrade.py launcher remove --both --user
+./upgrade.py launcher install --all --user
+./upgrade.py launcher remove --all --user
 ```
 
-Ao desinstalar ambos os aplicativos, um timer gerenciado no mesmo escopo também
+Ao desinstalar todos os aplicativos (`--all` ou `--both`), um timer gerenciado no mesmo escopo também
 é removido para evitar reinstalação automática. Use `--keep-systemd` para
 preservá-lo.
 
@@ -208,7 +218,8 @@ No escopo de usuário, as unidades ficam em
 `$XDG_CONFIG_HOME/systemd/user` (por padrão, `~/.config/systemd/user`) e executam
 `systemctl --user`. No escopo global, ficam em `/etc/systemd/system`. O timer
 preserva os caminhos XDG resolvidos durante a instalação e executa
-`update --both` no mesmo escopo.
+`update --all` no mesmo escopo. Timers criados por versões anteriores continuam
+executando `update --both` até serem reinstalados.
 
 ---
 
@@ -227,9 +238,9 @@ Cada escopo possui configuração independente. Para o usuário, o arquivo fica 
 ./upgrade.py config set channel preview --user
 ./upgrade.py config set policy notify-only --user
 
-# Fixar uma versão do Hub; "none" remove o pin
-./upgrade.py config set pin_hub 2.6.0-4603467860410368 --user
-./upgrade.py config set pin_hub none --user
+# Fixar uma versão do App; "none" remove o pin (pin_hub é aceito como nome antigo)
+./upgrade.py config set pin_app 2.6.0-4603467860410368 --user
+./upgrade.py config set pin_app none --user
 
 # Retenção, cache, logs e notificações
 ./upgrade.py config set retention 3 --user
@@ -251,7 +262,7 @@ Chaves disponíveis:
 | `cache_ttl` | 0 a 604800 segundos | 3600 |
 | `notifications` | `off`, `auto`, `desktop` | `off` |
 | `log_level` | `DEBUG`, `INFO`, `WARNING`, `ERROR` | `INFO` |
-| `pin_hub`, `pin_ide` | versão exata ou `none` | `none` |
+| `pin_app`, `pin_ide`, `pin_cli` | versão exata ou `none` | `none` |
 
 O canal `stable` ignora versões com marcadores de pré-lançamento. `preview`
 também considera previews anunciados no catálogo oficial descoberto; ele não
@@ -283,10 +294,11 @@ escopo de usuário, fica em
 `$XDG_DATA_HOME/antigravity-updater/apps` (por padrão,
 `~/.local/share/antigravity-updater/apps`). Dentro dele:
 
-- `Antigravity/` — link simbólico para a versão ativa do Hub.
+- `Antigravity/` — link simbólico para a versão ativa do App (nome mantido para preservar instalações existentes).
 - `Antigravity_IDE/` — link simbólico para a versão ativa do IDE.
-- `Antigravity_VERSOES/` — histórico validado do Hub.
+- `Antigravity_VERSOES/` — histórico validado do App.
 - `Antigravity_IDE_VERSOES/` — histórico validado do IDE.
+- `Antigravity_CLI/` e `Antigravity_CLI_VERSOES/` — link ativo e histórico do CLI; o executável é `Antigravity_CLI/antigravity` (o instalador oficial o publica como `agy`).
 
 Os launchers globais ficam em `/usr/local/share/applications`; os launchers do
 usuário ficam em `$XDG_DATA_HOME/applications`.

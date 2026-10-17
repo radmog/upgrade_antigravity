@@ -15,11 +15,15 @@ class Settings:
     cache_ttl: int = 3600
     notifications: str = "off"
     log_level: str = "INFO"
-    pin_hub: Optional[str] = None
+    pin_app: Optional[str] = None
     pin_ide: Optional[str] = None
+    pin_cli: Optional[str] = None
 
 
 FIELDS = frozenset(asdict(Settings()))
+PIN_FIELDS = ("pin_app", "pin_ide", "pin_cli")
+# O App se chamava Hub: configurações e comandos antigos continuam válidos.
+LEGACY_ALIASES = {"pin_hub": "pin_app"}
 CHOICES = {
     "channel": ("stable", "preview"),
     "policy": ("latest", "notify-only"),
@@ -36,7 +40,7 @@ def validate(settings: Settings) -> Settings:
         raise ValueError("retention precisa estar entre 1 e 100.")
     if type(settings.cache_ttl) is not int or settings.cache_ttl < 0 or settings.cache_ttl > 604800:
         raise ValueError("cache_ttl precisa estar entre 0 e 604800 segundos.")
-    for field in ("pin_hub", "pin_ide"):
+    for field in PIN_FIELDS:
         value = getattr(settings, field)
         if value is not None and (not isinstance(value, str) or not value.strip() or "/" in value):
             raise ValueError(f"Valor inválido para {field}.")
@@ -44,6 +48,12 @@ def validate(settings: Settings) -> Settings:
 
 
 def from_dict(data: Dict[str, Any]) -> Settings:
+    data = dict(data)
+    for legacy, current in LEGACY_ALIASES.items():
+        if legacy in data:
+            if current in data:
+                raise ValueError(f"Use apenas {current}; {legacy} é o nome antigo da mesma chave.")
+            data[current] = data.pop(legacy)
     unknown = set(data) - FIELDS
     if unknown:
         raise ValueError(f"Chaves de configuração desconhecidas: {', '.join(sorted(unknown))}")
@@ -94,6 +104,7 @@ def save(
 
 
 def parse_value(field: str, value: str) -> Any:
+    field = LEGACY_ALIASES.get(field, field)
     if field not in FIELDS:
         raise ValueError(f"Chave de configuração desconhecida: {field}")
     if field in ("retention", "cache_ttl"):
@@ -101,12 +112,13 @@ def parse_value(field: str, value: str) -> Any:
             return int(value)
         except ValueError as error:
             raise ValueError(f"{field} precisa ser um número inteiro.") from error
-    if field in ("pin_hub", "pin_ide") and value.lower() in ("none", "null", "off", ""):
+    if field in PIN_FIELDS and value.lower() in ("none", "null", "off", ""):
         return None
     return value.upper() if field == "log_level" else value.lower()
 
 
 def with_value(current: Settings, field: str, value: str) -> Settings:
+    field = LEGACY_ALIASES.get(field, field)
     return validate(replace(current, **{field: parse_value(field, value)}))
 
 

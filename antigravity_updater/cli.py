@@ -19,20 +19,28 @@ from . import systemd as systemd_integration
 from .paths import ScopePaths, resolve_scope
 
 
+# "hub" é o nome antigo do App e continua aceito em todos os pontos de entrada.
 TARGET_NAMES = {
-    "hub": "--hub",
-    "antigravity": "--hub",
+    "app": "--app",
+    "hub": "--app",
+    "antigravity": "--app",
     "ide": "--ide",
     "antigravity-ide": "--ide",
+    "cli": "--cli",
+    "antigravity-cli": "--cli",
+    "both": "--both",
+    "all": "--all",
 }
 
 
 def _add_targets(parser: argparse.ArgumentParser) -> None:
     targets = parser.add_mutually_exclusive_group()
-    targets.add_argument("--hub", action="store_const", const="hub", dest="target", help="somente o Hub")
+    targets.add_argument("--app", "--hub", action="store_const", const="app", dest="target", help="somente o App")
     targets.add_argument("--ide", action="store_const", const="ide", dest="target", help="somente o IDE")
-    targets.add_argument("--both", action="store_const", const="both", dest="target", help="ambos (padrão)")
-    parser.set_defaults(target="both")
+    targets.add_argument("--cli", action="store_const", const="cli", dest="target", help="somente o CLI")
+    targets.add_argument("--both", action="store_const", const="both", dest="target", help="App e IDE")
+    targets.add_argument("--all", action="store_const", const="all", dest="target", help="App, IDE e CLI (padrão)")
+    parser.set_defaults(target="all")
 
 
 def _add_scope(parser: argparse.ArgumentParser) -> None:
@@ -68,7 +76,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     changelog = subparsers.add_parser("changelog", help="consultar notas oficiais sem exigir root")
     _add_scope(changelog)
-    changelog.set_defaults(target="both")
+    changelog.set_defaults(target="all")
 
     current = subparsers.add_parser("current", help="mostrar versões ativas sem exigir root")
     _add_targets(current)
@@ -81,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     rollback = subparsers.add_parser("rollback", help="ativar uma versão anterior")
     _add_targets(rollback)
     _add_scope(rollback)
-    rollback.add_argument("version", nargs="?", help="versão específica; requer --hub ou --ide")
+    rollback.add_argument("version", nargs="?", help="versão específica; requer --app, --ide ou --cli")
 
     prune = subparsers.add_parser("prune", help="remover versões antigas")
     _add_targets(prune)
@@ -94,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall.add_argument(
         "--keep-systemd",
         action="store_true",
-        help="não remover o timer ao desinstalar ambos",
+        help="não remover o timer ao desinstalar todos",
     )
 
     launcher = subparsers.add_parser("launcher", help="instalar ou remover launchers XDG")
@@ -146,23 +154,24 @@ def normalize_legacy_args(arguments: Sequence[str]) -> List[str]:
         return result
 
     numeric = {
-        "1": ["update", "--both"],
-        "2": ["update", "--hub"],
+        "1": ["update", "--all"],
+        "2": ["update", "--app"],
         "3": ["update", "--ide"],
-        "4": ["update", "--both", "--force"],
+        "4": ["update", "--all", "--force"],
         "5": ["changelog"],
-        "6": ["check", "--both"],
-        "7": ["current", "--both"],
-        "8": ["list", "--both"],
-        "9": ["rollback", "--both"],
-        "10": ["prune", "2", "--both"],
+        "6": ["check", "--all"],
+        "7": ["current", "--all"],
+        "8": ["list", "--all"],
+        "9": ["rollback", "--all"],
+        "10": ["prune", "2", "--all"],
         "11": ["config", "show"],
         "12": ["cache", "status"],
         "13": ["logs"],
-        "14": ["launcher", "install", "--both"],
+        "14": ["launcher", "install", "--all"],
         "15": ["systemd", "status"],
-        "16": ["uninstall", "--both"],
-        "17": ["exit"],
+        "16": ["uninstall", "--all"],
+        "17": ["update", "--cli"],
+        "18": ["exit"],
     }
     if first in numeric:
         result = numeric[first]
@@ -176,14 +185,17 @@ def normalize_legacy_args(arguments: Sequence[str]) -> List[str]:
 
     aliases = {
         "both": ["update", "--both"],
-        "all": ["update", "--both"],
-        "hub": ["update", "--hub"],
-        "antigravity": ["update", "--hub"],
+        "all": ["update", "--all"],
+        "app": ["update", "--app"],
+        "hub": ["update", "--app"],
+        "antigravity": ["update", "--app"],
         "ide": ["update", "--ide"],
         "antigravity-ide": ["update", "--ide"],
-        "reinstall": ["update", "--both", "--force"],
-        "force": ["update", "--both", "--force"],
-        "f": ["update", "--both", "--force"],
+        "cli": ["update", "--cli"],
+        "antigravity-cli": ["update", "--cli"],
+        "reinstall": ["update", "--all", "--force"],
+        "force": ["update", "--all", "--force"],
+        "f": ["update", "--all", "--force"],
         "changelog": ["changelog"],
         "changes": ["changelog"],
         "release-notes": ["changelog"],
@@ -206,16 +218,24 @@ def parse_args(arguments: Optional[Sequence[str]] = None) -> argparse.Namespace:
         return argparse.Namespace(command=None, scope=_clean(raw[0]))
     normalized = normalize_legacy_args(raw)
     if normalized and normalized[0] == "exit":
-        return argparse.Namespace(command="exit", target="both")
+        return argparse.Namespace(command="exit", target="all")
     return build_parser().parse_args(normalized)
 
 
 def _selected_apps(target: str) -> List[str]:
-    if target == "hub":
+    if target in ("app", "hub"):
         return ["Antigravity"]
     if target == "ide":
         return ["Antigravity_IDE"]
-    return ["Antigravity", "Antigravity_IDE"]
+    if target == "cli":
+        return ["Antigravity_CLI"]
+    if target == "both":
+        return ["Antigravity", "Antigravity_IDE"]
+    return ["Antigravity", "Antigravity_IDE", "Antigravity_CLI"]
+
+
+def _label(app: str) -> str:
+    return core.rotulo_aplicativo(app)
 
 
 def _cached_fetch(cache: cache_module.TextCache, url: str, logger) -> str:
@@ -236,17 +256,37 @@ def _show_changelog(cache: cache_module.TextCache, logger) -> int:
     return 0 if core.consultar_changelog() else 1
 
 
-def _load_remote_catalog(cache: cache_module.TextCache, logger) -> bool:
+def _load_cli_manifest(cache: cache_module.TextCache, logger) -> None:
+    """Carrega o manifesto do CLI; em falha, deixa `core.manifesto_cli` vazio sem abortar o restante."""
+    core.manifesto_cli = None
+    try:
+        platform_id = core.detectar_plataforma_cli(core.ARCH_ALVO)
+    except ValueError as error:
+        observability.event(logger, "cli_manifest_unavailable", error=str(error))
+        return
+    base = core.descobrir_base_manifestos_cli(_cached_fetch(cache, core.URL_INSTALADOR_CLI, logger))
+    core.manifesto_cli = core.interpretar_manifesto_cli(
+        _cached_fetch(cache, f"{base}/manifests/{platform_id}.json", logger)
+    )
+    if core.manifesto_cli is None:
+        observability.event(logger, "cli_manifest_unavailable", platform=platform_id)
+
+
+def _load_remote_catalog(cache: cache_module.TextCache, logger, target: str = "all") -> bool:
     spinner = core.TerminalSpinner("Buscando versões e mapeando dependências dinâmicas")
     spinner.start()
-    html_content = _cached_fetch(cache, "https://antigravity.google/download", logger)
-    if not html_content:
-        spinner.stop(success=False, final_msg="Falha ao buscar a página de downloads")
-        return False
-    core.conteudo_total = html_content
-    for js in core.re.findall(r'(?:src|href)="([^"]+\.js)"', html_content):
-        js_url = js if js.startswith(("http://", "https://")) else f"https://antigravity.google/{js.lstrip('/')}"
-        core.conteudo_total += "\n" + _cached_fetch(cache, js_url, logger)
+    apps = _selected_apps(target)
+    if any(core.obter_aplicativo(app).fonte == "pagina" for app in apps):
+        html_content = _cached_fetch(cache, "https://antigravity.google/download", logger)
+        if not html_content:
+            spinner.stop(success=False, final_msg="Falha ao buscar a página de downloads")
+            return False
+        core.conteudo_total = html_content
+        for js in core.re.findall(r'(?:src|href)="([^"]+\.js)"', html_content):
+            js_url = js if js.startswith(("http://", "https://")) else f"https://antigravity.google/{js.lstrip('/')}"
+            core.conteudo_total += "\n" + _cached_fetch(cache, js_url, logger)
+    if "Antigravity_CLI" in apps:
+        _load_cli_manifest(cache, logger)
     core.conteudo_changelog = _cached_fetch(cache, core.URL_CHANGELOG, logger)
     spinner.stop(success=True, final_msg="Versões, links e changelog carregados com sucesso!")
     return True
@@ -286,29 +326,23 @@ def _settings_for_command(namespace: argparse.Namespace, configured: settings_mo
 
 
 def _process_remote_apps(target: str, configured: settings_module.Settings, force: bool = False):
+    pins = {
+        "Antigravity": configured.pin_app,
+        "Antigravity_IDE": configured.pin_ide,
+        "Antigravity_CLI": configured.pin_cli,
+    }
     results = []
-    if target in ("both", "hub"):
+    for app in _selected_apps(target):
+        info = core.obter_aplicativo(app)
         results.append(
             core.atualizar_aplicativo(
-                "Antigravity",
-                "antigravity-hub",
-                "hub",
+                app,
+                info.padrao_url,
+                info.aba,
                 forcar=force,
                 canal=configured.channel,
                 politica=configured.policy,
-                versao_fixada=configured.pin_hub,
-            )
-        )
-    if target in ("both", "ide"):
-        results.append(
-            core.atualizar_aplicativo(
-                "Antigravity_IDE",
-                "stable",
-                "ide",
-                forcar=force,
-                canal=configured.channel,
-                politica=configured.policy,
-                versao_fixada=configured.pin_ide,
+                versao_fixada=pins[app],
             )
         )
     return results
@@ -328,7 +362,7 @@ def _run_update(
     try:
         if show_diagnostics:
             core.exibir_diagnosticos()
-        if not _load_remote_catalog(cache, logger):
+        if not _load_remote_catalog(cache, logger, target):
             return 1
         results = _process_remote_apps(target, configured, force=force)
         success = all(results)
@@ -373,7 +407,7 @@ def _run_check(
     logger,
 ) -> int:
     checking = replace(configured, policy="notify-only")
-    if not _load_remote_catalog(cache, logger):
+    if not _load_remote_catalog(cache, logger, target):
         return 1
     success = all(_process_remote_apps(target, checking))
     observability.event(logger, "check_completed", success=success, channel=checking.channel)
@@ -393,23 +427,23 @@ def _run_mutation(namespace: argparse.Namespace, paths: ScopePaths) -> int:
         if namespace.command == "rollback":
             version = namespace.version
             if version and len(apps) != 1:
-                raise ValueError("Informe --hub ou --ide ao solicitar uma versão específica.")
+                raise ValueError("Informe --app, --ide ou --cli ao solicitar uma versão específica.")
             for app in apps:
                 selected, runtime = core.rollback_aplicativo(app, version)
-                print(f"{core.CLR_GREEN}✓ {app} revertido para {selected} ({runtime}).{core.CLR_RESET}")
+                print(f"{core.CLR_GREEN}✓ {_label(app)} revertido para {selected} ({runtime}).{core.CLR_RESET}")
         elif namespace.command == "prune":
             if namespace.keep < 1:
                 raise ValueError("A retenção precisa ser pelo menos 1.")
             for app in apps:
                 removed = core.podar_versoes(app, namespace.keep)
                 summary = ", ".join(removed) if removed else "nenhuma"
-                print(f"{app}: versões removidas: {summary}")
+                print(f"{_label(app)}: versões removidas: {summary}")
         elif namespace.command == "uninstall":
             for app in apps:
                 changed = core.desinstalar_aplicativo(app)
                 status = "removido" if changed else "não estava instalado"
-                print(f"{app}: {status}")
-            if namespace.target == "both" and not namespace.keep_systemd:
+                print(f"{_label(app)}: {status}")
+            if namespace.target in ("both", "all") and not namespace.keep_systemd:
                 unit_files = (
                     paths.unit_dir / systemd_integration.SERVICE_NAME,
                     paths.unit_dir / systemd_integration.TIMER_NAME,
@@ -419,14 +453,17 @@ def _run_mutation(namespace: argparse.Namespace, paths: ScopePaths) -> int:
                     print(f"Timer systemd removido do escopo {paths.scope}.")
         elif namespace.command == "launcher":
             for app in apps:
+                if not core.possui_launcher(app):
+                    print(f"{_label(app)}: aplicativo de terminal, sem launcher")
+                    continue
                 if namespace.action == "install":
                     if not core.criar_atalho(app):
-                        raise ValueError(f"Não existe uma instalação ativa de {app}.")
-                    print(f"{app}: launcher instalado")
+                        raise ValueError(f"Não existe uma instalação ativa de {_label(app)}.")
+                    print(f"{_label(app)}: launcher instalado")
                 else:
                     changed = core.remover_atalho(app)
                     status = "launcher removido" if changed else "launcher inexistente"
-                    print(f"{app}: {status}")
+                    print(f"{_label(app)}: {status}")
         return 0
     except (OSError, ValueError, RuntimeError) as error:
         print(f"{core.CLR_FAIL}Erro: {error}{core.CLR_RESET}")
@@ -470,7 +507,8 @@ def _run_config(namespace: argparse.Namespace, paths: ScopePaths) -> int:
             mode=0o644 if paths.scope == "system" else 0o600,
             directory_mode=0o755 if paths.scope == "system" else 0o700,
         )
-        print(f"{namespace.key}={settings_module.public_dict(updated)[namespace.key]}")
+        key = settings_module.LEGACY_ALIASES.get(namespace.key, namespace.key)
+        print(f"{key}={settings_module.public_dict(updated)[key]}")
         return 0
     except (OSError, ValueError) as error:
         print(f"{core.CLR_FAIL}Erro: {error}{core.CLR_RESET}")
@@ -517,29 +555,30 @@ def _show_logs(namespace: argparse.Namespace, paths: ScopePaths) -> int:
 def _interactive_request(scope="system") -> argparse.Namespace:
     choice = core.menu_selecao(scope)
     mapping = {
-        "1": argparse.Namespace(command="update", target="both", force=False, scope=scope),
-        "2": argparse.Namespace(command="update", target="hub", force=False, scope=scope),
+        "1": argparse.Namespace(command="update", target="all", force=False, scope=scope),
+        "2": argparse.Namespace(command="update", target="app", force=False, scope=scope),
         "3": argparse.Namespace(command="update", target="ide", force=False, scope=scope),
-        "4": argparse.Namespace(command="update", target="both", force=True, scope=scope),
-        "5": argparse.Namespace(command="changelog", target="both", scope=scope),
-        "6": argparse.Namespace(command="check", target="both", scope=scope),
-        "7": argparse.Namespace(command="current", target="both", scope=scope),
-        "8": argparse.Namespace(command="list", target="both", scope=scope),
-        "9": argparse.Namespace(command="rollback", target="both", version=None, scope=scope),
-        "10": argparse.Namespace(command="prune", target="both", keep=2, scope=scope),
+        "4": argparse.Namespace(command="update", target="all", force=True, scope=scope),
+        "5": argparse.Namespace(command="changelog", target="all", scope=scope),
+        "6": argparse.Namespace(command="check", target="all", scope=scope),
+        "7": argparse.Namespace(command="current", target="all", scope=scope),
+        "8": argparse.Namespace(command="list", target="all", scope=scope),
+        "9": argparse.Namespace(command="rollback", target="all", version=None, scope=scope),
+        "10": argparse.Namespace(command="prune", target="all", keep=2, scope=scope),
         "11": argparse.Namespace(command="config", action="show", key=None, value=None, scope=scope),
         "12": argparse.Namespace(command="cache", action="status", scope=scope),
         "13": argparse.Namespace(command="logs", tail=20, scope=scope),
-        "14": argparse.Namespace(command="launcher", action="install", target="both", scope=scope),
+        "14": argparse.Namespace(command="launcher", action="install", target="all", scope=scope),
         "15": argparse.Namespace(command="systemd", action="status", calendar="daily", scope=scope),
         "16": argparse.Namespace(
             command="uninstall",
-            target="both",
+            target="all",
             keep_systemd=False,
             confirm=True,
             scope=scope,
         ),
-        "17": argparse.Namespace(command="exit", target="both", scope=scope),
+        "17": argparse.Namespace(command="update", target="cli", force=False, scope=scope),
+        "18": argparse.Namespace(command="exit", target="all", scope=scope),
     }
     return mapping[choice]
 
@@ -584,7 +623,7 @@ def run(namespace: argparse.Namespace) -> int:
         print(f"\n{core.CLR_BLUE}Saindo sem realizar alterações.{core.CLR_RESET}\n")
         return 0
     if namespace.command == "uninstall" and getattr(namespace, "confirm", False):
-        confirmation = input("Digite REMOVER para confirmar a desinstalação de ambos: ").strip()
+        confirmation = input("Digite REMOVER para confirmar a desinstalação de todos: ").strip()
         if confirmation != "REMOVER":
             print("Desinstalação cancelada.")
             return 0

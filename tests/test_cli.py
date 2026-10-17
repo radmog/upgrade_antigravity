@@ -43,14 +43,22 @@ def test_scripts_possuem_sintaxe_valida():
 @pytest.mark.parametrize(
     ("arguments", "command", "target"),
     [
-        (["--current", "--hub"], "current", "hub"),
-        (["--hub", "--current"], "current", "hub"),
-        (["--changelog"], "changelog", "both"),
+        (["--current", "--hub"], "current", "app"),
+        (["--hub", "--current"], "current", "app"),
+        (["--current", "--app"], "current", "app"),
+        (["--current", "--cli"], "current", "cli"),
+        (["--changelog"], "changelog", "all"),
         (["list", "ide"], "list", "ide"),
         (["--both", "--force"], "update", "both"),
-        (["rollback", "1.2.3", "hub"], "rollback", "hub"),
-        (["6"], "check", "both"),
-        (["10"], "prune", "both"),
+        (["rollback", "1.2.3", "hub"], "rollback", "app"),
+        (["rollback", "1.2.3", "cli"], "rollback", "cli"),
+        (["6"], "check", "all"),
+        (["10"], "prune", "all"),
+        (["17"], "update", "cli"),
+        (["cli"], "update", "cli"),
+        (["hub"], "update", "app"),
+        (["update", "--all"], "update", "all"),
+        (["update"], "update", "all"),
     ],
 )
 def test_cli_preserva_argumentos_historicos(arguments, command, target):

@@ -45,3 +45,9 @@ existente até que uma migração seja documentada.
 - [x] Persistência privada de pacotes parciais entre execuções.
 - [x] Retomada com HTTP `Range` e reinício seguro quando não suportado.
 - [x] Validação de intervalos, respostas truncadas e integridade antes da publicação.
+
+## M9 — Antigravity CLI e renomeação para App
+
+- [x] Hub renomeado para App com aliases de compatibilidade.
+- [x] CLI instalado pelo manifesto oficial com SHA-512 e extração plana.
+- [x] Notas de versão adaptadas ao changelog oficial em `/docs/changelog`.

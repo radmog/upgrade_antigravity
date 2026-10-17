@@ -36,4 +36,4 @@ def test_readme_documenta_sair_como_ultima_opcao():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert "6. Sair" not in readme
-    assert "17. **Sair**" in readme
+    assert "18. **Sair**" in readme

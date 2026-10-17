@@ -10,17 +10,17 @@ def test_sair_e_ultima_opcao_do_menu():
     descriptions = [description for _number, description in core.MENU_OPCOES]
 
     assert numbers == list(range(1, len(core.MENU_OPCOES) + 1))
-    assert core.MENU_OPCOES[-1] == (17, "Sair")
+    assert core.MENU_OPCOES[-1] == (18, "Sair")
     assert all(description != "Sair" for description in descriptions[:-1])
 
 
 def test_menu_exibe_escopo_e_aceita_ultima_opcao(monkeypatch, capsys):
-    monkeypatch.setattr("builtins.input", lambda _prompt: "17")
+    monkeypatch.setattr("builtins.input", lambda _prompt: "18")
 
-    assert core.menu_selecao("user") == "17"
+    assert core.menu_selecao("user") == "18"
     output = capsys.readouterr().out
     assert "ESCOPO: USUÁRIO" in output
-    assert output.rfind("Sair") > output.find("Desinstalar Ambos")
+    assert output.rfind("Sair") > output.find("Desinstalar Todos")
 
 
 def test_cancelamento_do_menu_equivale_a_sair(monkeypatch):
@@ -29,7 +29,7 @@ def test_cancelamento_do_menu_equivale_a_sair(monkeypatch):
 
     monkeypatch.setattr("builtins.input", interrupted)
 
-    assert core.menu_selecao() == "17"
+    assert core.menu_selecao() == "18"
 
 
 def test_menu_interativo_preserva_escopo_usuario(monkeypatch):
@@ -66,7 +66,7 @@ def test_aliases_numericos_preservam_escopo_e_saida():
 
     assert check.command == "check"
     assert check.scope == "user"
-    assert cli.parse_args(["--user", "17"]).command == "exit"
+    assert cli.parse_args(["--user", "18"]).command == "exit"
 
 
 def test_desinstalacao_do_menu_exige_confirmacao(monkeypatch, capsys):
