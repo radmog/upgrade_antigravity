@@ -12,14 +12,14 @@ e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.
 - **Detecção Automática de Arquitetura**: Suporte para arquiteturas de 64 bits (`linux-x64`) e ARM (`linux-arm`).
 - **Antigravity CLI**: Instalado pelo manifesto oficial do CLI (descoberto no instalador publicado), com SHA-512 verificado e o mesmo pipeline de staging, ativação atômica e rollback. É um aplicativo de terminal e, por isso, não possui launcher.
 - **Diagnóstico do Sistema**: Coleta e exibe especificações de hardware (sistema operacional, processador, threads da CPU, memória RAM em uso/total e espaço em disco disponível) em uma tabela visual elegante no terminal.
-- **Web Scraping Dinâmico**: Realiza buscas automáticas na página oficial de downloads (`https://antigravity.google/download`) e rastreia scripts JavaScript referenciados para identificar as URLs e versões estáveis mais recentes.
+- **Web Scraping Dinâmico**: Realiza buscas automáticas na página oficial de downloads (`https://antigravity.google/download`) e rastreia scripts JavaScript referenciados para identificar as URLs e versões estáveis mais recentes do App e do IDE. O CLI usa o manifesto JSON oficial por plataforma (incluindo variantes musl).
 - **Exibição de Datas e Horários**: Exibe a data/hora do lançamento da versão no servidor remoto (obtida via cabeçalho HTTP `Last-Modified`) e a data/hora de instalação da versão local presente na máquina.
 - **Notas de Versão**: Busca o changelog oficial e exibe no terminal o resumo, as melhorias, as correções e os patches correspondentes exatamente à versão disponível de cada aplicativo.
 - **Acesso Traduzido ao Changelog**: Detecta o idioma configurado no sistema e, quando ele não é inglês, disponibiliza um link do Google Tradutor para a aba oficial do produto no idioma local. Uma falha ao obter o changelog não bloqueia a instalação.
 - **Forçar Reinstalação**: Permite forçar o re-download e a reinstalação dos aplicativos mesmo quando as versões local e remota coincidirem.
 - **Instalação Protegida**: Usa uma sessão temporária privada, impede execuções concorrentes e nunca publica downloads parciais.
 - **Retomada de Downloads**: Preserva pacotes interrompidos no estado privado do escopo e continua do último byte com HTTP `Range`, inclusive em uma execução posterior.
-- **Integridade e Staging**: Calcula SHA-256, valida o checksum oficial quando disponível e extrai pacotes somente após inspeção de segurança.
+- **Integridade e Staging**: Calcula SHA-256, valida o checksum oficial quando disponível (SHA-256 publicado ao lado do pacote para App e IDE; SHA-512 do manifesto para o CLI, sempre obrigatório) e extrai pacotes somente após inspeção de segurança.
 - **Ativação Transacional**: Testa o executável, troca o link ativo atomicamente e restaura a versão anterior se o teste posterior falhar.
 - **Rollback e Retenção**: Lista o histórico, permite selecionar uma versão anterior e remove versões antigas sem apagar a ativa ou a anterior.
 - **Gerenciamento de Versões**: Mantém um histórico de versões instaladas dentro de subpastas específicas (ex: `Antigravity_VERSOES/Antigravity-X.Y.Z`).

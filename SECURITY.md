@@ -63,6 +63,22 @@ Na versão 1.0.0, a desinstalação escolhida pelo menu exige a confirmação li
 arquivos. A opção de saída fica isolada na última posição e cancelamentos do
 menu são tratados como saída sem alterações.
 
+Desde a introdução do Antigravity CLI, o pacote do CLI é obtido pelo manifesto
+JSON oficial da plataforma, cuja base é lida do instalador publicado em
+`antigravity.google` (com fallback para a base conhecida). O manifesto fornece o
+SHA-512 do pacote, que é sempre obrigatório e validado antes da publicação; uma
+divergência descarta o download. A URL do manifesto precisa ser HTTPS e apontar
+para um `.tar.gz`, mas seu host não é restrito a um domínio específico. O pacote
+do CLI é plano e extraído sem remover componentes de caminho; todas as demais
+inspeções de extração continuam valendo. O manifesto só publica a versão mais
+recente, então um pin do CLI apenas a confirma e nunca fabrica URLs antigas. O
+CLI declara que se atualiza sozinho em segundo plano: no escopo de sistema o
+diretório da versão pertence ao root, e uma auto-atualização feita pelo próprio
+binário não passa pelas verificações desta ferramenta.
+
 Ainda não existe uma assinatura criptográfica independente: quando o servidor
 não oferece checksum, o hash calculado serve para auditoria e detecção posterior,
-mas não autentica a origem.
+mas não autentica a origem. Mesmo quando há checksum oficial (SHA-256 ao lado do
+pacote, ou SHA-512 do manifesto do CLI), ele vem do mesmo serviço que publica o
+pacote: detecta corrupção e trocas isoladas, mas não protege contra o
+comprometimento dessa origem.
