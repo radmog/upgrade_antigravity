@@ -2,7 +2,7 @@
 
 Este repositório contém uma ferramenta para gerenciar, instalar e atualizar o **Antigravity App** (antes chamado de Hub), o **Antigravity IDE** e o **Antigravity CLI** em sistemas Linux. A implementação canônica usa **Python 3**; `upgrade.py` é a entrada principal e `upgrade.sh` é um wrapper de compatibilidade que encaminha os mesmos argumentos para a CLI Python.
 
-A versão `1.1.0` é a release estável atual; `1.0.0` foi a primeira release estável. Consulte a
+A versão `1.1.1` é a release estável atual; `1.0.0` foi a primeira release estável. Consulte a
 [matriz de compatibilidade](docs/COMPATIBILITY.md), o
 [guia operacional](docs/OPERATIONS.md), o [processo de release](docs/RELEASING.md)
 e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.
@@ -14,11 +14,12 @@ e o [changelog](CHANGELOG.md). O runtime suporta Python 3.9 a 3.13.
 - **Diagnóstico do Sistema**: Coleta e exibe especificações de hardware (sistema operacional, processador, threads da CPU, memória RAM em uso/total e espaço em disco disponível) em uma tabela visual elegante no terminal.
 - **Web Scraping Dinâmico**: Realiza buscas automáticas na página oficial de downloads (`https://antigravity.google/download`) e rastreia scripts JavaScript referenciados para identificar as URLs e versões estáveis mais recentes do App e do IDE. O CLI usa o manifesto JSON oficial por plataforma (incluindo variantes musl).
 - **Exibição de Datas e Horários**: Exibe a data/hora do lançamento da versão no servidor remoto (obtida via cabeçalho HTTP `Last-Modified`) e a data/hora de instalação da versão local presente na máquina.
-- **Notas de Versão**: Busca o changelog oficial e exibe no terminal o resumo, as melhorias, as correções e os patches correspondentes exatamente à versão disponível de cada aplicativo.
+- **Notas de Versão**: Busca o changelog oficial e exibe no terminal o resumo, as melhorias, as correções e os patches correspondentes exatamente à versão disponível de cada aplicativo. O parser lê o HTML atual de `/docs/changelog` (`<article id="rel-<aba>-<versão>">`); se o formato do site mudar, as notas deixam de aparecer, mas a instalação continua.
 - **Acesso Traduzido ao Changelog**: Detecta o idioma configurado no sistema e, quando ele não é inglês, disponibiliza um link do Google Tradutor para a aba oficial do produto no idioma local. Uma falha ao obter o changelog não bloqueia a instalação.
 - **Forçar Reinstalação**: Permite forçar o re-download e a reinstalação dos aplicativos mesmo quando as versões local e remota coincidirem.
 - **Instalação Protegida**: Usa uma sessão temporária privada, impede execuções concorrentes e nunca publica downloads parciais.
 - **Retomada de Downloads**: Preserva pacotes interrompidos no estado privado do escopo e continua do último byte com HTTP `Range`, inclusive em uma execução posterior.
+  O parcial fica em `downloads/<sha256 da URL>.part` dentro do diretório de estado do escopo (modo 0700), sem expiração por tempo, e só é reaproveitado para a mesma URL exata. Respostas truncadas ou inválidas descartam o parcial automaticamente; para forçar um novo download, apague o arquivo `.part`.
 - **Integridade e Staging**: Calcula SHA-256, valida o checksum oficial quando disponível (SHA-256 publicado ao lado do pacote para App e IDE; SHA-512 do manifesto para o CLI, sempre obrigatório) e extrai pacotes somente após inspeção de segurança.
 - **Ativação Transacional**: Testa o executável, troca o link ativo atomicamente e restaura a versão anterior se o teste posterior falhar.
 - **Rollback e Retenção**: Lista o histórico, permite selecionar uma versão anterior e remove versões antigas sem apagar a ativa ou a anterior.

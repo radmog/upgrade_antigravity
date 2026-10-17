@@ -2,7 +2,7 @@
 
 Todas as mudanças relevantes do projeto são registradas neste arquivo.
 
-## Não lançado
+## 1.1.1
 
 - Renomeia Hub para App em rótulos, menu, flags (`--app`) e configuração
   (`pin_app`); `--hub`, `hub` e `pin_hub` continuam aceitos.
@@ -14,6 +14,8 @@ Todas as mudanças relevantes do projeto são registradas neste arquivo.
   com novo HTML, e o parser agora lê `<article id="rel-<aba>-<versão>">`,
   aceitando versões com o build numérico anexado pelo download.
 - Menu: a opção 17 instala apenas o CLI e **Sair** passa a ser a 18.
+- Documenta a retomada de downloads, o formato HTML esperado pelo parser de
+  notas e o comportamento de pins do CLI em arm64.
 
 ## 1.1.0
 

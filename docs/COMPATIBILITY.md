@@ -10,6 +10,8 @@
 | Antigravity CLI, Linux x86_64 glibc | Suportado | Manifesto `linux_amd64`; instalação e health check verificados contra o serviço real |
 | Antigravity CLI, Linux arm64 glibc | Compatível | Manifesto `linux_arm64` resolvido; sem execução em hardware arm64 |
 | Antigravity CLI, Linux musl (x86_64/arm64) | Compatível | Detecção coberta por testes com mocks; sem execução em um sistema musl |
+
+O manifesto do CLI publica apenas a versão corrente. Um pin de CLI que não coincida com ela é tratado como indisponível, sem montar URLs antigas. Em arm64, o CLI só é instalado se o manifesto trouxer `linux_arm64`; App e IDE dependem dos pacotes `linux-arm` publicados pelo fabricante.
 | Python 3.9–3.13 | Suportado | Matriz do GitHub Actions em todas as versões menores |
 | Python 3.14 | Compatível | Suíte local completa; fora da matriz mínima da release |
 | Bash | Wrapper compatível | `bash -n`, ShellCheck e shfmt no CI |
